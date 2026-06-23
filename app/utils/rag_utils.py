@@ -238,108 +238,310 @@ def _strip_noise_lines(text: str, noise_lines: set) -> str:
     return "\n".join(lines)
 
 
-def _semantic_chunk(text: str, source: str, page: int) -> List[Dict]:
+def _extract_sections(text: str) -> List[Dict]:
     """
-    Semantic-boundary-first chunking for SBI BRS/FSD documents.
-    Strategy:
-      1. Split at section headings (numbered clauses, ALL-CAPS labels).
-      2. For sections within the size limit — keep whole (never split mid-requirement).
-      3. For oversized sections — split with RecursiveCharacterTextSplitter.
-      4. Apply quality gate: discard fragments under MIN_CHARS or MIN_WORDS.
+    Split text into logical sections based on structural signals.
+    Each section has a heading and its full body content.
+    Returns list of {heading, body, start_pos} dicts.
     """
-    # ── Guard: treat None/non-string input safely ─────────────────────────────
     if not text or not isinstance(text, str):
         return []
 
-    MAX_CHARS = 1200
-    MIN_CHARS = 80
-    MIN_WORDS = 10
-    OVERLAP   = 150
-
-    # ── Step 1: split at semantic section boundaries ──────────────────────────
-    # IMPORTANT: use a NON-CAPTURING lookahead ((?=...)) so re.split() does NOT
-    # include captured group fragments (which would be None for optional groups).
-    # The original bug was caused by (\.\d+)* — a capturing group inside split()
-    # which made re.split() return None entries for non-matching optional groups.
-    SECTION_RE = re.compile(
-        r"(?m)(?="
-        r"^\d+(?:\.\d+)*[\s\.\)]\s+"   # "1. " or "1.2 " or "1.2.3 " — non-capturing (?:)
-        r"|^[A-Z]\.\s+"                 # "A. "
-        r"|^[A-Z]{2,}[\s]*[:\-]"        # "NOTE:" or "FIELD-"
+    # Section boundary patterns — ordered by specificity
+    SECTION_BOUNDARY = re.compile(
+        r"(?m)^(?:"
+        r"\d+(?:\.\d+)*[\s\.\)]\s+[A-Z\w]"   # "1. " or "1.2 " or "1.2.3 Heading"
+        r"|[A-Z]\.\s+[A-Z\w]"                  # "A. Heading"
+        r"|[A-Z]{3,}[\s]*[:\-]"                # "FIELD:" or "NOTE-"
+        r"|(?:FIELD|SCREEN|TRANSACTION|ERROR|STATUS|MODE|TABLE|SECTION)\s+\w"  # banking keywords
         r")"
     )
 
-    # re.split() with a zero-width lookahead never adds captured groups,
-    # so every element is a real string (never None).
-    raw_sections = SECTION_RE.split(text)
+    boundaries = [m.start() for m in SECTION_BOUNDARY.finditer(text)]
 
-    # Defensive: filter out anything that is not a non-empty string
-    sections = [s.strip() for s in raw_sections if s is not None and isinstance(s, str) and s.strip()]
+    if len(boundaries) < 2:
+        # No clear structure — treat whole text as one section
+        return [{"heading": "", "body": text, "start_pos": 0}]
 
-    # ── Fallback: paragraph split if no section structure detected ────────────
-    if len(sections) <= 1:
-        raw_paras = text.split("\n\n")
-        # Same defensive filter — text.split() never returns None, but be safe
-        sections = [p.strip() for p in raw_paras if p is not None and p.strip()]
+    sections = []
+    for i, start in enumerate(boundaries):
+        end  = boundaries[i + 1] if i + 1 < len(boundaries) else len(text)
+        body = text[start:end].strip()
+        if not body:
+            continue
+        # First line is the heading
+        lines   = body.split("\n")
+        heading = lines[0].strip()[:120]
+        sections.append({"heading": heading, "body": body, "start_pos": start})
 
-    # ── Step 2: size-gate each section ───────────────────────────────────────
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size    = MAX_CHARS,
-        chunk_overlap = OVERLAP,
-        separators    = ["\n\n", "\n", ". ", " ", ""],
-    )
+    return sections
 
-    final_chunks: List[str] = []
+
+def _extract_table_rows(text: str) -> List[str]:
+    """
+    Extract individual rows from pipe-delimited tables or
+    space-aligned tabular content common in banking BRS/FSD docs.
+    Returns list of row strings, each self-contained with column context.
+    """
+    rows = []
+
+    # Pipe-delimited tables (markdown style)
+    pipe_rows = [l.strip() for l in text.split("\n") if l.strip().startswith("|") and "|" in l[1:]]
+    if len(pipe_rows) >= 2:
+        # First row is usually the header — prepend it to every data row
+        header = pipe_rows[0]
+        is_separator = lambda r: re.fullmatch(r"[\|\s\-:]+", r)
+        data_rows = [r for r in pipe_rows[1:] if not is_separator(r)]
+        for row in data_rows:
+            if len(row.strip()) > 10:
+                rows.append(f"{header}\n{row}")
+        return rows
+
+    # Space-aligned tabular content (common in SBI docs)
+    # Detect by: lines where words are separated by 2+ spaces consistently
+    lines = [l for l in text.split("\n") if l.strip()]
+    tabular_lines = [l for l in lines if re.search(r"\S {2,}\S", l)]
+    if len(tabular_lines) >= 3:
+        # Treat first tabular line as header
+        header = tabular_lines[0]
+        for row in tabular_lines[1:]:
+            if len(row.strip()) > 10:
+                rows.append(f"{header}\n{row}")
+        return rows
+
+    return []
+
+
+def _extract_numbered_items(text: str) -> List[str]:
+    """
+    Extract numbered/bulleted items that represent individual requirements.
+    Groups sub-items with their parent (e.g. 1.1 + 1.1.1 + 1.1.2 stay together).
+    """
+    items = []
+    current_item_lines = []
+    current_level      = None
+
+    ITEM_RE = re.compile(r"^(\d+(?:\.\d+)*|[a-z]\.|[ivxlc]+\.|\*|\-|\•)\s+", re.IGNORECASE)
+
+    for line in text.split("\n"):
+        match = ITEM_RE.match(line.strip())
+        if match:
+            prefix = match.group(1)
+            level  = prefix.count(".") if "." in prefix else 0
+
+            if current_item_lines:
+                # If this is a sub-item of the current item, group with it
+                if current_level is not None and level > current_level:
+                    current_item_lines.append(line)
+                else:
+                    # New top-level item — save current and start new
+                    item_text = "\n".join(current_item_lines).strip()
+                    if len(item_text) > 20:
+                        items.append(item_text)
+                    current_item_lines = [line]
+                    current_level      = level
+            else:
+                current_item_lines = [line]
+                current_level      = level
+        elif current_item_lines:
+            # Continuation line of current item
+            current_item_lines.append(line)
+
+    if current_item_lines:
+        item_text = "\n".join(current_item_lines).strip()
+        if len(item_text) > 20:
+            items.append(item_text)
+
+    return items
+
+
+def _hierarchical_chunk(text: str, source: str, page: int) -> List[Dict]:
+    """
+    Hierarchical chunking strategy for SBI banking documents (BRS/FSD/Solution docs).
+
+    Structure:
+        Level 0 — PARENT chunk: full section (heading + all content)
+                  Stored with chunk_level='parent'
+                  Used to provide full context to LLM during retrieval
+
+        Level 1 — CHILD chunks: individual rows/items within the section
+                  Stored with chunk_level='child', parent_id=parent_chunk_id
+                  Used for precise vector similarity search
+
+    Retrieval flow:
+        1. Query ChromaDB for best matching CHILD chunks
+        2. For each matched child, fetch its PARENT chunk
+        3. Return parent text to LLM (full section context)
+
+    Why this matters for banking docs:
+        - Field spec table row "UTH-DR-ACCT-NO | 17 | Numeric | Mandatory"
+          only makes sense with the table header above it
+        - Requirement "1.1.2 Amount validation" only makes sense with
+          parent "1.1 Transaction Rules" for context
+        - Error code "E001: Invalid account" only makes sense with
+          the surrounding error handling section
+    """
+    if not text or not isinstance(text, str):
+        return []
+
+    MIN_CHARS = 40
+    MIN_WORDS = 6
+    MAX_PARENT_CHARS = 2000   # cap parent size to avoid token overflow in LLM
+    MAX_CHILD_CHARS  = 600    # child chunks stay small for precise retrieval
+
+    result_chunks: List[Dict] = []
+    chunk_counter = 0
+
+    def make_id(prefix: str) -> str:
+        nonlocal chunk_counter
+        chunk_counter += 1
+        return f"{prefix}_{page}_{chunk_counter}"
+
+    # ── Step 1: Split into sections ───────────────────────────────────────────
+    sections = _extract_sections(text)
+
     for section in sections:
-        # Extra guard: skip if somehow a non-string slipped through
-        if not section or not isinstance(section, str):
-            continue
-        if len(section) < MIN_CHARS:
-            continue                                          # discard noise
-        elif len(section) <= MAX_CHARS:
-            final_chunks.append(section)                     # keep whole
-        else:
-            sub = splitter.split_text(section)
-            # split_text can return empty strings in edge cases
-            final_chunks.extend([c for c in sub if c and c.strip()])
+        heading      = section["heading"]
+        section_body = section["body"]
 
-    # ── Step 3: quality gate + section heading extraction ─────────────────────
-    result: List[Dict] = []
-    for i, c in enumerate(final_chunks):
-        if not c or not isinstance(c, str):
-            continue
-        c = c.strip()
-        if not c:
-            continue
-        if len(c) < MIN_CHARS:
-            continue
-        if len(c.split()) < MIN_WORDS:
+        if not section_body.strip() or len(section_body.strip()) < MIN_CHARS:
             continue
 
-        # Extract heading for metadata enrichment
-        first_line = c.split("\n")[0].strip()
-        heading = ""
-        if first_line:
-            is_numbered  = bool(re.match(r"^(\d+(?:\.\d+)*|[A-Z]\.)\s+\S", first_line))
-            upper_ratio  = sum(ch.isupper() for ch in first_line) / max(len(first_line), 1)
-            is_caps_head = len(first_line) < 80 and upper_ratio > 0.4
-            if is_numbered or is_caps_head:
-                heading = first_line[:120]
+        # ── Step 2: Create PARENT chunk for this section ──────────────────────
+        # Parent = full section text (capped at MAX_PARENT_CHARS)
+        # If section is very long, take heading + first MAX_PARENT_CHARS chars
+        parent_text = section_body[:MAX_PARENT_CHARS].strip()
+        if len(section_body) > MAX_PARENT_CHARS:
+            # Add truncation note so LLM knows there's more
+            parent_text += "\n[…section continues]"
 
-        result.append({
-            "text"           : c,
+        if len(parent_text.split()) < MIN_WORDS:
+            continue
+
+        parent_id = make_id("P")
+        result_chunks.append({
+            "text"           : parent_text,
             "source"         : source,
             "page"           : page,
-            "chunk_index"    : i,
+            "chunk_index"    : chunk_counter,
+            "chunk_level"    : "parent",
+            "parent_id"      : parent_id,     # self-reference for parents
             "section_heading": heading,
+            "char_count"     : len(parent_text),
         })
 
-    return result
+        # ── Step 3: Create CHILD chunks within this section ───────────────────
+        children_added = 0
+
+        # Strategy A: table rows (highest priority for banking field spec tables)
+        table_rows = _extract_table_rows(section_body)
+        if table_rows:
+            for row in table_rows:
+                row = row.strip()
+                if len(row) < MIN_CHARS or len(row.split()) < MIN_WORDS:
+                    continue
+                child_id = make_id("C")
+                result_chunks.append({
+                    "text"           : row[:MAX_CHILD_CHARS],
+                    "source"         : source,
+                    "page"           : page,
+                    "chunk_index"    : chunk_counter,
+                    "chunk_level"    : "child",
+                    "parent_id"      : parent_id,
+                    "section_heading": heading,
+                    "char_count"     : len(row),
+                    "child_type"     : "table_row",
+                })
+                children_added += 1
+            # If we got table rows, skip other child strategies
+            # (table rows are the most precise unit for this section)
+            if children_added > 0:
+                continue
+
+        # Strategy B: numbered/bulleted items (requirements lists)
+        numbered_items = _extract_numbered_items(section_body)
+        if numbered_items and len(numbered_items) >= 2:
+            for item in numbered_items:
+                item = item.strip()
+                if len(item) < MIN_CHARS or len(item.split()) < MIN_WORDS:
+                    continue
+                child_id = make_id("C")
+                result_chunks.append({
+                    "text"           : item[:MAX_CHILD_CHARS],
+                    "source"         : source,
+                    "page"           : page,
+                    "chunk_index"    : chunk_counter,
+                    "chunk_level"    : "child",
+                    "parent_id"      : parent_id,
+                    "section_heading": heading,
+                    "char_count"     : len(item),
+                    "child_type"     : "numbered_item",
+                })
+                children_added += 1
+            if children_added > 0:
+                continue
+
+        # Strategy C: sentence-level chunks for narrative sections
+        # Split on sentence boundaries, group into ~300 char windows
+        sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z])", section_body)
+        window, window_len = [], 0
+        for sent in sentences:
+            sent = sent.strip()
+            if not sent:
+                continue
+            if window_len + len(sent) > MAX_CHILD_CHARS and window:
+                child_text = " ".join(window).strip()
+                if len(child_text) >= MIN_CHARS and len(child_text.split()) >= MIN_WORDS:
+                    child_id = make_id("C")
+                    result_chunks.append({
+                        "text"           : child_text,
+                        "source"         : source,
+                        "page"           : page,
+                        "chunk_index"    : chunk_counter,
+                        "chunk_level"    : "child",
+                        "parent_id"      : parent_id,
+                        "section_heading": heading,
+                        "char_count"     : len(child_text),
+                        "child_type"     : "sentence_window",
+                    })
+                    children_added += 1
+                window, window_len = [sent], len(sent)
+            else:
+                window.append(sent)
+                window_len += len(sent)
+
+        # Flush remaining window
+        if window:
+            child_text = " ".join(window).strip()
+            if len(child_text) >= MIN_CHARS and len(child_text.split()) >= MIN_WORDS:
+                child_id = make_id("C")
+                result_chunks.append({
+                    "text"           : child_text,
+                    "source"         : source,
+                    "page"           : page,
+                    "chunk_index"    : chunk_counter,
+                    "chunk_level"    : "child",
+                    "parent_id"      : parent_id,
+                    "section_heading": heading,
+                    "char_count"     : len(child_text),
+                    "child_type"     : "sentence_window",
+                })
+            children_added += 1
+
+        # If section is short enough that no children were needed,
+        # the parent itself is already a good atomic chunk — no child needed
+        if children_added == 0 and len(section_body) <= MAX_CHILD_CHARS:
+            pass  # parent is sufficient, children would just duplicate it
+
+    return result_chunks
 
 
-# Keep _hybrid_chunk as an alias so nothing else breaks
+# Keep _hybrid_chunk and _semantic_chunk as aliases so nothing else breaks
 def _hybrid_chunk(text: str, source: str, page: int) -> List[Dict]:
-    return _semantic_chunk(text, source, page)
+    return _hierarchical_chunk(text, source, page)
+
+def _semantic_chunk(text: str, source: str, page: int) -> List[Dict]:
+    return _hierarchical_chunk(text, source, page)
 
 
 def embed_texts(texts: List[str]) -> List[List[float]]:
@@ -682,6 +884,10 @@ def _ingest_single_pdf(
                         "application_name": c.get("application_name", ""),
                         "section_heading" : c.get("section_heading", ""),   # NEW
                         "char_count"      : len(c["text"]),                 # NEW
+                        # New hierarchical fields
+                        "chunk_level"     : c.get("chunk_level", "parent"),
+                        "parent_id"       : c.get("parent_id", ""),
+                        "child_type"      : c.get("child_type", ""),
                     }
                     for c in batch_c
                 ],
@@ -846,7 +1052,11 @@ def list_rag_documents(
                     "department_id"   : meta.get("department_id", "general"),
                     "application_name": meta.get("application_name", ""),
                 }
-            docs[did]["total_chunks"] += 1
+            # Count only parent chunks for display (children are internal)
+            chunk_level = meta.get("chunk_level", "parent")
+            if chunk_level == "parent":
+                docs[did]["total_chunks"] += 1
+                
     except Exception as e:
         print(f"⚠ ChromaDB metadata iteration failed: {e}")
         return []
@@ -1375,15 +1585,30 @@ def _mmr_select(
 
 def retrieve_rag_chunks_for_page(
     page_text: str,
-    top_k:     int                  = PAGE_RAG_TOP_K,
-    doc_ids:   Optional[List[str]]  = None,
+    top_k:     int                 = PAGE_RAG_TOP_K,
+    doc_ids:   Optional[List[str]] = None,
 ) -> List[Dict]:
     """
-    Embed page_text → ChromaDB cosine search → lightweight MMR using
-    cosine scores (no extra embedding calls) → LLM rerank.
+    Hierarchical RAG retrieval:
 
-    Does NOT request embeddings from ChromaDB — avoids 'Error finding id'
-    bug in some ChromaDB versions.
+    Step 1 — Query ChromaDB for best matching CHILD chunks only
+             (children are precise atomic units: table rows, numbered items, sentences)
+             This gives high-precision similarity search
+
+    Step 2 — For each matched child, fetch its PARENT chunk
+             (parent = full section with heading and surrounding content)
+             This gives the LLM full context, not just the matched row
+
+    Step 3 — Deduplicate: if two children have the same parent, return parent once
+             (avoids sending the same section twice)
+
+    Step 4 — MMR diversification on the parent set
+             (ensures we return diverse sections, not 5 chunks from same table)
+
+    Step 5 — LLM rerank
+
+    Falls back to flat retrieval if no hierarchical chunks exist
+    (backward compatible with existing ingested documents)
     """
     col = _get_collection()
     if col is None or not page_text.strip():
@@ -1400,52 +1625,200 @@ def retrieve_rag_chunks_for_page(
         print("  📚 RAG: skipped (collection empty)")
         return []
 
+    # ── Build where filter ────────────────────────────────────────────────────
     where_filter = None
     if doc_ids:
-        if len(doc_ids) == 1:
-            where_filter = {"doc_id": doc_ids[0]}
-        else:
-            where_filter = {"doc_id": {"$in": doc_ids}}
+        doc_filter = {"doc_id": doc_ids[0]} if len(doc_ids) == 1 else {"doc_id": {"$in": doc_ids}}
+        where_filter = doc_filter
 
-    # Build a focused query from functional content only.
-    # Strip document boilerplate before embedding to avoid retrieving
-    # unrelated chunks when the page is mostly metadata.
+    # ── Strip boilerplate from query ──────────────────────────────────────────
     _BOILERPLATE_PATTERNS = [
-        r"tcs sbi confidential",
-        r"this document is confidential",
-        r"unauthorised access",
-        r"document revision",
-        r"change control",
-        r"sign.?off stage",
-        r"intended audience",
-        r"how to use this document",
-        r"about this document",
-        r"list of abbreviations",
-        r"all trademarks",
-        r"ver(?:sion)?\s*\d+\.\d+",
-        r"confidential\s+\d+",
+        r"tcs sbi confidential", r"this document is confidential",
+        r"unauthorised access", r"document revision", r"change control",
+        r"sign.?off stage", r"intended audience", r"how to use this document",
+        r"about this document", r"list of abbreviations", r"all trademarks",
+        r"ver(?:sion)?\s*\d+\.\d+", r"confidential\s+\d+",
     ]
     query_text = page_text
     for pattern in _BOILERPLATE_PATTERNS:
         query_text = re.sub(pattern, " ", query_text, flags=re.IGNORECASE)
     query_text = re.sub(r"\s{2,}", " ", query_text).strip()
 
-    # If after stripping boilerplate almost nothing remains,
-    # the page is metadata-only — no RAG context needed
     if len(query_text) < 150:
-        print(f"  📚 RAG: page appears to be boilerplate only "
-              f"({len(query_text)} chars after strip) — skipping retrieval")
+        print(f"  📚 RAG: page appears boilerplate only — skipping")
         return []
 
     query_vec = embed_texts([query_text])[0]
-    fetch_n   = min(MMR_FETCH_K, col_count)
 
+    # ── Check if collection has hierarchical chunks ───────────────────────────
+    try:
+        sample = col.get(
+            limit=5,
+            include=["metadatas"],
+            where=where_filter,
+        )
+        sample_metas  = sample.get("metadatas") or []
+        has_hierarchy = any(
+            m.get("chunk_level") in ("child", "parent")
+            for m in sample_metas if m
+        )
+    except Exception:
+        has_hierarchy = False
+
+    # ── HIERARCHICAL PATH ─────────────────────────────────────────────────────
+    if has_hierarchy:
+        print(f"  📚 RAG: hierarchical retrieval mode")
+
+        # Step 1: Query CHILD chunks only for precise matching
+        child_filter = {"chunk_level": "child"}
+        if where_filter:
+            child_filter = {"$and": [where_filter, {"chunk_level": "child"}]}
+
+        fetch_n = min(MMR_FETCH_K, col_count)
+        try:
+            child_results = col.query(
+                query_embeddings = [query_vec],
+                n_results        = fetch_n,
+                where            = child_filter,
+                include          = ["documents", "metadatas", "distances"],
+            )
+        except Exception as e:
+            print(f"  ✗ Child chunk query failed: {e} — falling back to flat retrieval")
+            has_hierarchy = False  # fall through to flat path below
+
+        if has_hierarchy:
+            raw_docs  = child_results["documents"][0]
+            raw_metas = child_results["metadatas"][0]
+            raw_dists = child_results["distances"][0]
+
+            # Filter by relevance threshold
+            matched_children = []
+            for doc, meta, dist in zip(raw_docs, raw_metas, raw_dists):
+                if doc is None:
+                    continue
+                score = round(1.0 - float(dist), 4)
+                if score < RAG_MIN_RELEVANCE_SCORE:
+                    continue
+                matched_children.append({
+                    "text"     : doc,
+                    "meta"     : meta or {},
+                    "score"    : score,
+                    "parent_id": (meta or {}).get("parent_id", ""),
+                })
+
+            print(f"  📚 Matched {len(matched_children)} child chunks "
+                  f"(threshold={RAG_MIN_RELEVANCE_SCORE})")
+
+            if not matched_children:
+                print(f"  📚 No children met threshold — returning empty")
+                return []
+
+            # Step 2: Collect unique parent IDs from matched children
+            parent_ids = list(dict.fromkeys(
+                c["parent_id"] for c in matched_children if c["parent_id"]
+            ))
+
+            print(f"  📚 Fetching {len(parent_ids)} parent chunks for context")
+
+            # Step 3: Fetch parent chunks by parent_id
+            # ChromaDB doesn't support "id IN [...]" directly via where,
+            # so we use get() with the parent_ids as document IDs
+            # Parents were stored with IDs like "{doc_id}_{chunk_index}"
+            # We need to find them by their parent_id metadata field
+            parent_chunks: List[Dict] = []
+
+            # Batch fetch parents using parent_id metadata filter
+            for pid in parent_ids[:RERANK_TOP_K * 2]:   # cap to avoid too many fetches
+                try:
+                    parent_filter = {"parent_id": pid, "chunk_level": "parent"}
+                    if doc_ids:
+                        if len(doc_ids) == 1:
+                            parent_filter = {"$and": [
+                                {"doc_id": doc_ids[0]},
+                                {"parent_id": pid},
+                                {"chunk_level": "parent"},
+                            ]}
+                        else:
+                            parent_filter = {"$and": [
+                                {"doc_id": {"$in": doc_ids}},
+                                {"parent_id": pid},
+                                {"chunk_level": "parent"},
+                            ]}
+
+                    p_result = col.get(
+                        where   = parent_filter,
+                        include = ["documents", "metadatas"],
+                        limit   = 1,
+                    )
+                    p_docs  = p_result.get("documents") or []
+                    p_metas = p_result.get("metadatas") or []
+
+                    if p_docs and p_docs[0]:
+                        # Find best child score for this parent
+                        best_child_score = max(
+                            c["score"] for c in matched_children
+                            if c["parent_id"] == pid
+                        )
+                        parent_chunks.append({
+                            "text"  : p_docs[0],
+                            "source": (p_metas[0] or {}).get("source", ""),
+                            "page"  : (p_metas[0] or {}).get("page", 0),
+                            "score" : best_child_score,   # inherit best child score
+                            "section_heading": (p_metas[0] or {}).get("section_heading", ""),
+                        })
+                except Exception as e:
+                    print(f"  ⚠ Parent fetch failed for {pid}: {e}")
+                    continue
+
+            print(f"  📚 Retrieved {len(parent_chunks)} parent chunks")
+
+            # If parent fetch yielded nothing, fall back to child texts directly
+            if not parent_chunks:
+                print(f"  📚 Parent fetch empty — using child texts as fallback")
+                parent_chunks = [
+                    {
+                        "text"  : c["text"],
+                        "source": c["meta"].get("source", ""),
+                        "page"  : c["meta"].get("page", 0),
+                        "score" : c["score"],
+                    }
+                    for c in matched_children[:RERANK_TOP_K]
+                ]
+
+            # Step 4: MMR on parents for diversity
+            selected:  List[Dict] = []
+            remaining             = list(parent_chunks)
+            used_pages: set       = set()
+
+            while len(selected) < MMR_FINAL_K and remaining:
+                best     = None
+                best_scr = float("-inf")
+                for c in remaining:
+                    relevance  = c["score"]
+                    diversity  = 0.15 if c["page"] in used_pages else 0.0
+                    mmr_score  = MMR_LAMBDA * relevance - (1 - MMR_LAMBDA) * diversity
+                    if mmr_score > best_scr:
+                        best_scr = mmr_score
+                        best     = c
+                if best is None:
+                    break
+                selected.append(best)
+                used_pages.add(best["page"])
+                remaining.remove(best)
+
+            print(f"  🎯 MMR: {len(parent_chunks)} parents → {len(selected)} selected")
+            return rerank_chunks(page_text, selected)
+
+    # ── FLAT FALLBACK PATH (for documents ingested before hierarchical chunking) ──
+    print(f"  📚 RAG: flat retrieval mode (legacy chunks)")
+
+    fetch_n = min(MMR_FETCH_K, col_count)
     try:
         results = col.query(
-            query_embeddings=[query_vec],
-            n_results=fetch_n,
-            where=where_filter,
-            include=["documents", "metadatas", "distances"],
+            query_embeddings = [query_vec],
+            n_results        = fetch_n,
+            where            = where_filter,
+            include          = ["documents", "metadatas", "distances"],
         )
     except Exception as e:
         print(f"  ✗ ChromaDB query failed: {e}")
@@ -1455,19 +1828,13 @@ def retrieve_rag_chunks_for_page(
     raw_metas = results["metadatas"][0]
     raw_dists = results["distances"][0]
 
-
-    # Minimum cosine similarity for a chunk to be considered relevant at all.
-    # ChromaDB returns cosine distance (0=identical, 2=opposite).
-    # distance 0.45 → similarity 0.55 — below this the chunk is noise.
-    RAG_MIN_RELEVANCE_SCORE = 0.55
-
     candidates = []
     for doc, meta, dist in zip(raw_docs, raw_metas, raw_dists):
         if doc is None:
             continue
         score = round(1.0 - float(dist), 4)
         if score < RAG_MIN_RELEVANCE_SCORE:
-            continue   # hard filter — irrelevant chunk discarded before MMR/rerank
+            continue
         candidates.append({
             "text"  : doc or "",
             "source": (meta or {}).get("source", ""),
@@ -1475,33 +1842,22 @@ def retrieve_rag_chunks_for_page(
             "score" : score,
         })
 
-    print(f"  📚 RAG fetch: {len(candidates)} relevant candidate(s) after score filter "
-          f"(threshold={RAG_MIN_RELEVANCE_SCORE}, fetch_k={fetch_n}, "
-          f"collection={_collection.count()}, "
-          f"scope={'scoped' if doc_ids else 'all'})")
+    print(f"  📚 Flat fetch: {len(candidates)} candidates after score filter")
 
     if not candidates:
-        print(f"  📚 RAG: no chunks met relevance threshold — skipping RAG context")
         return []
 
-    if len(candidates) <= 1:
-        return rerank_chunks(page_text, candidates)
-
-    # ── Score-based MMR (no extra API calls) ─────────────────────────────────
-    # Uses cosine relevance scores from ChromaDB as proxy.
-    # Diversity is enforced by tracking which page each chunk came from —
-    # penalise picking two chunks from the same source page consecutively.
-    selected:   List[Dict] = []
+    # MMR on flat candidates
+    selected:  List[Dict] = []
     remaining             = list(candidates)
-    used_pages:  set       = set()
+    used_pages: set       = set()
 
     while len(selected) < MMR_FINAL_K and remaining:
         best     = None
         best_scr = float("-inf")
         for c in remaining:
             relevance  = c["score"]
-            # small diversity penalty if we already have a chunk from this page
-            diversity  = 0.0 if c["page"] not in used_pages else 0.15
+            diversity  = 0.15 if c["page"] in used_pages else 0.0
             mmr_score  = MMR_LAMBDA * relevance - (1 - MMR_LAMBDA) * diversity
             if mmr_score > best_scr:
                 best_scr = mmr_score
@@ -1512,12 +1868,7 @@ def retrieve_rag_chunks_for_page(
         used_pages.add(best["page"])
         remaining.remove(best)
 
-    print(f"  🎯 MMR: {len(candidates)} candidates → {len(selected)} diverse chunks selected")
-
-    # ── LLM rerank for final semantic ordering ────────────────────────────────
-    print(f"  🔄 Reranking {len(selected)} MMR-selected chunks…")
     return rerank_chunks(page_text, selected)
-
 
 def _build_rag_context_block(chunks: List[Dict]) -> str:
     if not chunks:
