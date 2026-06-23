@@ -289,116 +289,6 @@ async def extract_reference_text(
     except Exception as e:
         raise HTTPException(500, f"Failed to extract text: {e}")
 
-
-def extract_relevant_segments_for_requirement(
-    req_description: str,
-    page_text: str,
-    window_chars: int = 800,
-) -> str:
-    """
-    Extract only the segments of page_text that are semantically relevant
-    to the given requirement description.
-
-    Strategy:
-    1. Split page into logical segments (paragraphs, table rows, numbered items)
-    2. Score each segment for relevance to the requirement using keyword overlap
-       + structural signals (same field name, same transaction code, same screen number)
-    3. Return top segments with a small surrounding window for context
-
-    This gives the LLM the exact evidence it needs without the noise.
-    """
-    import re
-
-    if not page_text.strip():
-        return ""
-
-    # ── Extract key terms from the requirement ────────────────────────────────
-    # Numbers (transaction codes, screen numbers, field lengths)
-    req_numbers = set(re.findall(r'\b\d{3,6}\b', req_description))
-    # Capitalised phrases (field names, system names)
-    req_caps    = set(re.findall(r'\b[A-Z][A-Z_\-]{2,}\b', req_description))
-    # All meaningful words (length >= 4, not stopwords)
-    STOPWORDS   = {'that', 'this', 'with', 'from', 'when', 'must', 'shall',
-                   'will', 'should', 'have', 'been', 'into', 'only', 'also',
-                   'each', 'after', 'before', 'field', 'system', 'user', 'screen'}
-    req_words   = {
-        w.lower() for w in re.findall(r'\b\w{4,}\b', req_description)
-        if w.lower() not in STOPWORDS
-    }
-
-    # ── Split page into logical segments ─────────────────────────────────────
-    # Split at: blank lines, table rows (|), numbered items, section headings
-    raw_segments = re.split(
-        r'\n{2,}|(?=^\s*\d+[\.\)]\s)|(?=^\|)|(?=^[A-Z]{3,}[\s:]\s)',
-        page_text,
-        flags=re.MULTILINE
-    )
-    segments = [s.strip() for s in raw_segments if s and s.strip() and len(s.strip()) > 20]
-
-    if not segments:
-        return page_text[:window_chars]
-
-    # ── Score each segment ────────────────────────────────────────────────────
-    scored = []
-    for seg in segments:
-        score = 0.0
-        seg_upper = seg.upper()
-        seg_lower = seg.lower()
-
-        # Exact number match (transaction code, screen number, field length)
-        # These are high-signal — if the requirement mentions "9086" and the
-        # segment contains "9086", it's almost certainly the right row
-        seg_numbers = set(re.findall(r'\b\d{3,6}\b', seg))
-        number_hits = len(req_numbers & seg_numbers)
-        score += number_hits * 3.0   # heavily weight number matches
-
-        # Capitalised term match (field names like "UTH-DR-ACCT-NO")
-        seg_caps = set(re.findall(r'\b[A-Z][A-Z_\-]{2,}\b', seg))
-        score   += len(req_caps & seg_caps) * 2.0
-
-        # General word overlap
-        seg_words = {w.lower() for w in re.findall(r'\b\w{4,}\b', seg)}
-        word_hits  = len(req_words & seg_words)
-        score     += word_hits * 0.5
-
-        # Bonus: segment looks like a table row or field spec (high information density)
-        if '|' in seg or re.search(r'\b(MANDATORY|OPTIONAL|NUMERIC|ALPHA|VARCHAR)\b', seg_upper):
-            score += 1.5
-
-        # Bonus: segment contains an error code or error message pattern
-        if re.search(r'\b[Ee]\d{3,4}\b|ERROR\s+CODE|ERR[-_]', seg):
-            score += 1.5
-
-        scored.append((score, seg))
-
-    # ── Take top segments ─────────────────────────────────────────────────────
-    scored.sort(key=lambda x: x[0], reverse=True)
-
-    # Always include segments with score > 0; cap total chars at window_chars * 3
-    selected   = []
-    total_chars = 0
-    MAX_CHARS   = window_chars * 3
-
-    for score, seg in scored:
-        if score <= 0:
-            break
-        if total_chars + len(seg) > MAX_CHARS:
-            break
-        selected.append(seg)
-        total_chars += len(seg)
-
-    # If nothing scored, fall back to first window_chars of the page
-    if not selected:
-        return page_text[:window_chars]
-
-    # Return in original page order (re-sort by position in page_text)
-    def page_position(seg: str) -> int:
-        idx = page_text.find(seg[:40])
-        return idx if idx >= 0 else 999999
-
-    selected.sort(key=page_position)
-    return "\n\n".join(selected)
-
 # ============================================================================
 # Generate test cases — RAG pipeline, testcase_client sourced from user record
 # ============================================================================
@@ -574,110 +464,146 @@ async def generate_testcases(
         # RTM MODE: generate test cases per selected requirement
         # ══════════════════════════════════════════════════════════════════════
         if request.rtm_mode and request.selected_requirements:
-            print(f"\n📋 RTM mode: generating for {len(request.selected_requirements)} selected requirements")
+            print(f"\n📋 RTM mode: {len(request.selected_requirements)} requirements across pages")
 
             from collections import defaultdict
             reqs_by_page: dict = defaultdict(list)
             for req in request.selected_requirements:
                 reqs_by_page[req.get("page", 1)].append(req)
 
-            # Build a page_text lookup for fast access
             page_text_lookup = {p["page_number"]: p["complete_text"] for p in pages}
 
-            for page_num, page_reqs in sorted(reqs_by_page.items()):
-                full_page_text = page_text_lookup.get(page_num, "")
-                page_meta      = detect_page_structure(full_page_text)
+            # Pre-merge continuation pages (same as standard mode)
+            merged_pages: list = []
+            skip_next = False
+            for idx, page in enumerate(pages):
+                if skip_next:
+                    skip_next = False
+                    continue
+                prev_text = pages[idx - 1]["complete_text"] if idx > 0 else ""
+                if idx > 0 and is_continuation_page(page["complete_text"], prev_text):
+                    if merged_pages:
+                        last = merged_pages[-1]
+                        last["complete_text"] = last["complete_text"] + "\n\n" + page["complete_text"]
+                        last["merged"] = True
+                        continue
+                merged_pages.append(dict(page))
+
+            # Only process pages that have at least one selected requirement
+            pages_with_reqs = {pn for pn in reqs_by_page}
+
+            # Also include adjacent pages if they contain continuation content
+            expanded_pages = set(pages_with_reqs)
+            for pn in pages_with_reqs:
+                if pn - 1 >= 1:
+                    expanded_pages.add(pn - 1)
+                if pn + 1 <= len(pages):
+                    expanded_pages.add(pn + 1)
+
+            print(f"   Pages with selected requirements: {sorted(pages_with_reqs)}")
+            print(f"   Total pages to process (with adjacent): {len(expanded_pages)}")
+
+            for idx, page in enumerate(merged_pages):
+                pn        = page["page_number"]
+                page_text = page["complete_text"]
+
+                # Skip pages that have no selected requirements
+                # (and are not adjacent context pages)
+                if pn not in expanded_pages:
+                    continue
+
+                # Get selected requirements for this specific page
+                page_reqs = reqs_by_page.get(pn, [])
+
+                # If this is only an adjacent context page (no reqs), skip generation
+                # but include its text in context_window via normal mechanism
+                if not page_reqs:
+                    continue
+
+                skip, skip_reason = should_skip_page(page_text)
+                if skip:
+                    print(f"   ⏭  Page {pn} skipped: {skip_reason}")
+                    page_results.append({
+                        "page_number": pn, "testcases": [],
+                        "status": "skipped", "error": skip_reason,
+                    })
+                    continue
 
                 print(f"\n{'─'*55}")
-                print(f"🔄 RTM Page {page_num}: {len(page_reqs)} requirement(s)")
+                print(f"🔄 RTM Page {pn}: {len(page_reqs)} requirement(s) selected")
+                for r in page_reqs:
+                    print(f"   • {r['id']}: {r['title'][:70]}")
 
-                # Build context window from adjacent pages
-                page_idx = next((i for i, p in enumerate(pages) if p["page_number"] == page_num), None)
-                context_window = ""
-                if page_idx is not None:
-                    prev_tail, next_head = "", ""
-                    if page_idx > 0:
-                        pt = pages[page_idx - 1]["complete_text"]
-                        if pt.strip():
-                            prev_tail = f"[Previous page tail]:\n{pt[-500:].strip()}"
-                    if page_idx < len(pages) - 1:
-                        nt = pages[page_idx + 1]["complete_text"]
-                        if nt.strip():
-                            next_head = f"[Next page head]:\n{nt[:300].strip()}"
-                    context_window = "\n\n".join(filter(None, [prev_tail, next_head]))
+                page_meta = detect_page_structure(page_text)
 
-                # ── Process each requirement INDIVIDUALLY ──────────────────────
-                # This is the key difference: one LLM call per requirement
-                # so each call is tightly focused and cannot bleed into others
-                for req in page_reqs:
-                    req_id   = req.get("id", "")
-                    req_title = req.get("title", "")
-                    req_desc  = req.get("description", "")
+                # Build context window
+                prev_tail, next_head = "", ""
+                if idx > 0:
+                    pt = merged_pages[idx - 1]["complete_text"]
+                    if pt.strip():
+                        prev_tail = f"[Previous page {merged_pages[idx-1]['page_number']} — tail]:\n{pt[-600:].strip()}"
+                if idx < len(merged_pages) - 1:
+                    nt = merged_pages[idx + 1]["complete_text"]
+                    if nt.strip():
+                        next_head = f"[Next page {merged_pages[idx+1]['page_number']} — head]:\n{nt[:400].strip()}"
+                context_window = "\n\n".join(filter(None, [prev_tail, next_head]))
 
-                    print(f"   📌 {req_id}: {req_title[:60]}")
+                # RAG query: use page text enriched with transaction/screen codes
+                rag_query_parts = [page_text]
+                if page_meta["transaction_codes"]:
+                    rag_query_parts.append("Transaction codes: " + ", ".join(page_meta["transaction_codes"]))
+                if page_meta["screen_numbers"]:
+                    rag_query_parts.append("Screen numbers: " + ", ".join(page_meta["screen_numbers"]))
+                rag_query = " ".join(rag_query_parts)
 
-                    # Layer 2: extract only the relevant segments from the page
-                    # for THIS specific requirement (not the whole page)
-                    relevant_segments = extract_relevant_segments_for_requirement(
-                        req_description = req_desc,
-                        page_text       = full_page_text,
-                        window_chars    = 600,
-                    )
+                rag_chunks = retrieve_rag_chunks_for_page(
+                    rag_query,
+                    top_k=PAGE_RAG_TOP_K,
+                    doc_ids=None,
+                )
+                for c in rag_chunks:
+                    key = c["text"]
+                    if key not in rag_chunks_index:
+                        rag_chunks_index[key] = c
 
-                    # Layer 1 + Layer 2 combined:
-                    # The requirement tells the LLM WHAT to test
-                    # The relevant segments give it the EXACT EVIDENCE (field specs, values)
-                    # The full page is included trimmed at end as fallback reference
-                    focused_text = (
-                        f"## REQUIREMENT TO TEST [{req_id}]\n"
-                        f"Title: {req_title}\n"
-                        f"Description: {req_desc}\n\n"
-                        f"## MOST RELEVANT CONTENT FROM PAGE {page_num}\n"
-                        f"(Segments most closely related to this requirement)\n\n"
-                        f"{relevant_segments}\n\n"
-                        f"## FULL PAGE {page_num} CONTENT (reference — use for exact values, table rows, error codes)\n"
-                        f"{full_page_text[:2000]}"  # cap to avoid token overflow
-                    )
+                # Build the RTM requirement block for this page
+                req_block = "\n".join(
+                    f"  • [{r['id']}] {r['title']}: {r['description']}"
+                    for r in page_reqs
+                )
 
-                    # RAG query: use requirement description + relevant segments
-                    # This finds domain knowledge specific to THIS requirement, not the whole page
-                    rag_query = f"{req_desc}\n\n{relevant_segments}"
-                    rag_chunks = retrieve_rag_chunks_for_page(
-                        rag_query,
-                        top_k=PAGE_RAG_TOP_K,
-                        doc_ids=None,
-                    )
-                    for c in rag_chunks:
-                        key = c["text"]
-                        if key not in rag_chunks_index:
-                            rag_chunks_index[key] = c
+                # Compose focused page text:
+                # Requirements list tells LLM what to focus on
+                # Full page text gives all field specs, tables, exact values
+                focused_text = (
+                    f"## SELECTED REQUIREMENTS FOR THIS PAGE (generate test cases ONLY for these)\n\n"
+                    f"{req_block}\n\n"
+                    f"## FULL PAGE {pn} CONTENT\n"
+                    f"(Use this for exact field names, lengths, screen numbers, error messages, table values)\n\n"
+                    f"{page_text}"
+                )
 
-                    result = generate_testcases_for_page_rag(
-                        page_number                     = page_num,
-                        page_text                       = focused_text,
-                        document_name                   = request.document_name,
-                        rag_chunks                      = rag_chunks,
-                        user_prompt                     = up_prompt,
-                        testcase_type                   = tc_type,
-                        page_metadata                   = page_meta,
-                        prompt_file_content             = None,
-                        selected_department_description = selected_dept_desc,
-                        department_id                   = getattr(current_user, "departmentid", None),
-                        context_window                  = context_window,
-                        already_covered                 = list(generated_scenarios),
-                    )
-
-                    # Give each requirement its own page_result entry for the summary
-                    result["page_number"] = page_num
-                    result["requirement_id"] = req_id
-                    page_results.append(result)
-
-                    if result["status"] == "success":
-                        all_testcases.extend(result["testcases"])
-                        for tc in result["testcases"]:
-                            sn = tc.get("Scenario Name") or tc.get("Sub Function Description", "")
-                            if sn and sn not in generated_scenarios:
-                                generated_scenarios.append(sn)
+                result = generate_testcases_for_page_rag(
+                    page_number                     = pn,
+                    page_text                       = focused_text,
+                    document_name                   = request.document_name,
+                    rag_chunks                      = rag_chunks,
+                    user_prompt                     = up_prompt,
+                    testcase_type                   = tc_type,
+                    page_metadata                   = page_meta,
+                    prompt_file_content             = None,
+                    selected_department_description = selected_dept_desc,
+                    department_id                   = getattr(current_user, "departmentid", None),
+                    context_window                  = context_window,
+                    already_covered                 = list(generated_scenarios),
+                )
+                page_results.append(result)
+                if result["status"] == "success":
+                    all_testcases.extend(result["testcases"])
+                    for tc in result["testcases"]:
+                        sn = tc.get("Scenario Name") or tc.get("Sub Function Description", "")
+                        if sn and sn not in generated_scenarios:
+                            generated_scenarios.append(sn)
 
         # ══════════════════════════════════════════════════════════════════════
         # STANDARD MODE: existing per-page pipeline (unchanged)
