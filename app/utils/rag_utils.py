@@ -3771,11 +3771,27 @@ If a field has no applicable value write N/A — never leave it empty.
             "</additional_instructions>"
         )
 
+    # Detect if this is an RTM call by checking if page_text starts with the RTM header
+    is_rtm_call = page_text.startswith("## SELECTED REQUIREMENTS FOR THIS PAGE")
+
+    rtm_instruction = ""
+    if is_rtm_call:
+        rtm_instruction = (
+            "\n<rtm_instruction>\n"
+            "This is an RTM (Requirements Traceability Matrix) generation call.\n"
+            "The SELECTED REQUIREMENTS section lists the ONLY requirements you must generate test cases for.\n"
+            "Do NOT generate test cases for anything outside those listed requirements.\n"
+            "Each generated test case must be traceable to one of the listed requirement IDs.\n"
+            "Use the FULL PAGE CONTENT section for exact field specs, values, and table data.\n"
+            "</rtm_instruction>"
+        )
+
     return f"""<task>
 Generate comprehensive {testcase_type} test cases for the page content below.
 Document: {document_name}
 Page: {page_number}
 </task>
+{rtm_instruction}
 
 {structure_block}
 
@@ -3796,7 +3812,7 @@ Do NOT generate test cases from rag_context, context_window, or already_generate
 </page_content>
 
 <hard_rules>
-1. Generate test cases ONLY for functional requirements explicitly present in page_content.
+1. {"Generate test cases ONLY for the requirements listed in the SELECTED REQUIREMENTS section. Each test case must trace to one of those requirement IDs." if is_rtm_call else "Generate test cases ONLY for functional requirements explicitly present in page_content."}
 2. Do NOT invent fields, transactions, screens, or validations not shown in page_content.
 3. Return empty array [] if page_content contains ONLY:
    - Document metadata (version, author, dates)
