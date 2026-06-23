@@ -803,7 +803,7 @@ const GeneratePanel: React.FC<{
                             cursor: 'pointer', transition: 'all 0.2s',
                             '&:hover': { borderColor: '#1aa7d1' },
                         }}
-                        onClick={() => { setRtmMode(!rtmMode); setRtmExtracted(false); setRequirements([]); }}
+                        onClick={() => { setRtmMode(!rtmMode); setRtmExtracted(false); setRequirements([]); setSelectedReqIds(new Set()); }}
                     >
                         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
                             <Box sx={{
@@ -823,7 +823,7 @@ const GeneratePanel: React.FC<{
                                 </Typography>
                                 <Typography variant="caption" color="text.secondary">
                                     {rtmMode
-                                        ? 'First extract requirements, select which ones to test, then generate'
+                                        ? 'Extract requirements first, select which ones to test, then generate'
                                         : 'Standard mode — generate test cases from all pages directly'}
                                 </Typography>
                             </Box>
@@ -838,13 +838,13 @@ const GeneratePanel: React.FC<{
                 </Box>
             )}
 
-            {/* ── RTM: Extract Requirements Step ── */}
+            {/* ── RTM Step 1: Extract button — shown only before extraction ── */}
             {rtmMode && !rtmExtracted && (
                 <Box sx={{ width: '100%', maxWidth: 620, mb: 3, textAlign: 'left' }}>
                     <Alert severity="info" sx={{ mb: 2 }}>
                         <Typography variant="body2">
-                            <strong>Step 1:</strong> Click below to analyze the document and extract all testable requirements.
-                            You can then select which requirements to generate test cases for.
+                            <strong>Step 1:</strong> Analyze the document and extract all testable requirements.
+                            You can then select which ones to generate test cases for.
                         </Typography>
                     </Alert>
                     {rtmError && <Alert severity="error" sx={{ mb: 2 }}>{rtmError}</Alert>}
@@ -859,12 +859,12 @@ const GeneratePanel: React.FC<{
                             py: 1.5, fontWeight: 700, textTransform: 'none', borderRadius: 2,
                         }}
                     >
-                        {rtmLoading ? 'Analyzing document — this may take 1-2 minutes…' : 'Extract Requirements from Document'}
+                        {rtmLoading ? 'Analyzing document — this may take 1–2 minutes…' : 'Extract Requirements from Document'}
                     </Button>
                 </Box>
             )}
 
-            {/* ── RTM: Requirements Selector ── */}
+            {/* ── RTM Step 2: Requirements selector — shown after extraction ── */}
             {rtmMode && rtmExtracted && requirements.length > 0 && (
                 <Box sx={{ width: '100%', maxWidth: 720, mb: 3, textAlign: 'left' }}>
                     <Alert severity="success" sx={{ mb: 2, py: 0.5 }}>
@@ -897,13 +897,14 @@ const GeneratePanel: React.FC<{
                         </Box>
 
                         {/* Requirements grouped by section */}
-                        <Box sx={{ maxHeight: 420, overflowY: 'auto', overflowX: 'hidden',
+                        <Box sx={{
+                            maxHeight: 420, overflowY: 'auto', overflowX: 'hidden',
                             '&::-webkit-scrollbar': { width: 6 },
                             '&::-webkit-scrollbar-thumb': { bgcolor: '#1aa7d1', borderRadius: 3 },
                         }}>
                             {Object.entries(reqsBySection).map(([section, sectionReqs]) => {
-                                const sectionIds   = sectionReqs.map(r => r.id);
-                                const allSectionIn = sectionIds.every(id => selectedReqIds.has(id));
+                                const sectionIds    = sectionReqs.map(r => r.id);
+                                const allSectionIn  = sectionIds.every(id => selectedReqIds.has(id));
                                 const someSectionIn = sectionIds.some(id => selectedReqIds.has(id));
                                 return (
                                     <Box key={section}>
@@ -929,7 +930,7 @@ const GeneratePanel: React.FC<{
                                             </Typography>
                                         </Box>
 
-                                        {/* Requirements in section */}
+                                        {/* Requirements in this section */}
                                         {sectionReqs.map((req, idx) => (
                                             <Box
                                                 key={req.id}
@@ -952,7 +953,7 @@ const GeneratePanel: React.FC<{
                                                     sx={{ p: 0.5, flexShrink: 0, mt: 0.25, color: '#1aa7d1', '&.Mui-checked': { color: '#1aa7d1' } }}
                                                 />
                                                 <Box sx={{ flex: 1, minWidth: 0 }}>
-                                                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
                                                         <Chip label={req.id} size="small" variant="outlined"
                                                             sx={{ fontSize: '0.6rem', height: 16, color: '#1aa7d1', borderColor: '#1aa7d1', flexShrink: 0 }} />
                                                         <Chip label={`P${req.page}`} size="small"
@@ -962,9 +963,9 @@ const GeneratePanel: React.FC<{
                                                         </Typography>
                                                     </Box>
                                                     <Typography variant="caption" color="text.secondary"
-                                                        sx={{ display: 'block', mt: 0.25, overflow: 'hidden', textOverflow: 'ellipsis',
-                                                              whiteSpace: 'nowrap', maxWidth: '100%', fontSize: '0.68rem' }}>
-                                                        {req.description.slice(0, 120)}{req.description.length > 120 ? '…' : ''}
+                                                        sx={{ display: 'block', mt: 0.25, fontSize: '0.68rem',
+                                                              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                                        {req.description.slice(0, 140)}{req.description.length > 140 ? '…' : ''}
                                                     </Typography>
                                                 </Box>
                                             </Box>
@@ -974,60 +975,61 @@ const GeneratePanel: React.FC<{
                             })}
                         </Box>
 
-                        {/* Footer */}
+                        {/* Footer summary */}
                         <Box sx={{ px: 1.5, py: 0.75, bgcolor: '#eaf6fc', borderTop: '1px solid #c8e6f5' }}>
                             <Typography variant="caption" color="text.secondary">
-                                {selectedReqIds.size === 0
+                                {noneSelected
                                     ? '⚠️ No requirements selected — please select at least one'
-                                    : `✅ ${selectedReqIds.size} requirement(s) selected → test cases will be generated for these only`}
+                                    : `✅ ${selectedReqIds.size} requirement(s) selected`}
                             </Typography>
                         </Box>
                     </Box>
-
-                    {requirements.length === 0 && (
-                        <Alert severity="warning" sx={{ mt: 1 }}>
-                            No testable requirements found. Try standard mode.
-                        </Alert>
-                    )}
                 </Box>
             )}
 
+            {/* ── RTM: no requirements found after extraction ── */}
             {rtmMode && rtmExtracted && requirements.length === 0 && (
-                <Alert severity="warning" sx={{ mb: 3, maxWidth: 620 }}>
-                    No testable requirements were extracted. Switch to standard mode to generate from raw pages.
+                <Alert severity="warning" sx={{ mb: 3, maxWidth: 620, textAlign: 'left' }}>
+                    No testable requirements were found. Try switching to standard mode.
                 </Alert>
             )}
 
+            {/* ── Info alert ── */}
             <Alert severity="info" sx={{ mb: 4, maxWidth: 560, textAlign: 'left' }}>
                 <Typography variant="body2">
                     {rtmMode
-                        ? `💡 RTM mode sends ONLY selected requirements to the LLM — higher precision, better coverage per requirement. RAG context is retrieved from all ingested documents for your department automatically.`
-                        : `💡 Standard mode generates test cases page-by-page from the full document. RAG context is retrieved from all ingested documents for your department automatically.`}
+                        ? '💡 RTM mode sends selected requirements + full page content to the LLM for precise, traceable test case generation.'
+                        : '💡 Standard mode generates test cases page-by-page from the full document.'}
+                    {' '}RAG context is retrieved from all ingested documents for your department automatically.
                 </Typography>
             </Alert>
 
-            <Button
-                variant="contained"
-                size="large"
-                onClick={handleGenerate}
-                disabled={
-                    (rtmMode && rtmExtracted && selectedReqIds.size === 0) ||
-                    (rtmMode && !rtmExtracted && !rtmLoading)
-                }
-                startIcon={<AutoAwesome />}
-                sx={{
-                    background: 'linear-gradient(135deg, #1aa7d1 0%, #1f3c88 100%)',
-                    py: 2, px: 6, fontSize: '1.1rem', fontWeight: 700,
-                    textTransform: 'none', borderRadius: 3,
-                    boxShadow: '0 4px 20px rgba(31,60,136,0.4)',
-                    '&:hover': { background: 'linear-gradient(135deg, #1f3c88 0%, #1aa7d1 100%)' },
-                    '&:disabled': { background: 'grey.400' },
-                }}
-            >
-                {rtmMode && !rtmExtracted
-                    ? 'Extract Requirements First ↑'
-                    : `Generate Testcases — ${testcaseClient}`}
-            </Button>
+            {/* ── Generate button — hidden in RTM mode until requirements are extracted ── */}
+            {(!rtmMode || rtmExtracted) && (
+                <Button
+                    variant="contained"
+                    size="large"
+                    onClick={handleGenerate}
+                    disabled={rtmMode && noneSelected}
+                    startIcon={<AutoAwesome />}
+                    sx={{
+                        background: 'linear-gradient(135deg, #1aa7d1 0%, #1f3c88 100%)',
+                        py: 2, px: 6, fontSize: '1.1rem', fontWeight: 700,
+                        textTransform: 'none', borderRadius: 3,
+                        boxShadow: '0 4px 20px rgba(31,60,136,0.4)',
+                        '&:hover': { background: 'linear-gradient(135deg, #1f3c88 0%, #1aa7d1 100%)' },
+                        '&:disabled': { opacity: 0.5 },
+                    }}
+                >
+                    Generate Testcases — {testcaseClient}
+                    {rtmMode && !noneSelected && (
+                        <Typography component="span" variant="caption"
+                            sx={{ ml: 1.5, opacity: 0.85, fontWeight: 400 }}>
+                            ({selectedReqIds.size} requirements)
+                        </Typography>
+                    )}
+                </Button>
+            )}
         </Box>
     );
 };
