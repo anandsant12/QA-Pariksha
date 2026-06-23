@@ -308,6 +308,7 @@ const RagKnowledgeBasePanel: React.FC = () => {
     const [ingestApp,  setIngestApp]  = useState('');   // NEW
     const [deptError,  setDeptError]  = useState('');
     const fileRef = React.useRef<HTMLInputElement>(null);
+    const [ingestJob, setIngestJob]   = useState<{jobId: string; filename: string; status: string; error?: string} | null>(null);
 
     const fetchDocuments = async () => {
         setLoading(true); setError('');
@@ -343,18 +344,44 @@ const RagKnowledgeBasePanel: React.FC = () => {
             const fd = new FormData();
             fd.append('file', file);
             fd.append('department_id', ingestDept);
-            if (ingestApp) fd.append('application_name', ingestApp);   // NEW
+            if (ingestApp) fd.append('application_name', ingestApp);
             const res = await fetch(`${API_BASE}/ingest-rag`, {
                 method: 'POST', credentials: 'include', body: fd,
             });
-            if (!res.ok) throw new Error((await res.json()).detail || 'Ingestion failed');
+            if (!res.ok) throw new Error((await res.json()).detail || 'Ingestion start failed');
             const data = await res.json();
-            const parts   = data.parts ? ` (${data.parts} parts)` : '';
-            const appHint = ingestApp ? ` [${ingestApp}]` : '';
-            setSuccess(`✅ "${data.filename}" ingested${parts}${appHint} — ${data.total_chunks} chunks`);
+
+            // Returns immediately with job_id
+            setIngestJob({ jobId: data.job_id, filename: data.filename, status: 'running' });
+            setSuccess(`⏳ Ingestion started for "${data.filename}" (Job ID: ${data.job_id}). You can continue using the app — we'll notify you when done.`);
             setIngestDept('');
-            setIngestApp('');   // NEW — reset
-            fetchDocuments();
+            setIngestApp('');
+
+            // Poll in background
+            const poll = async () => {
+                for (let i = 0; i < 300; i++) {  // max ~25 min polling
+                    await new Promise(r => setTimeout(r, 5000));
+                    try {
+                        const statusRes = await fetch(`${API_BASE}/ingest-rag/status/${data.job_id}`, { credentials: 'include' });
+                        const statusData = await statusRes.json();
+
+                        if (statusData.status === 'done') {
+                            setSuccess(`✅ "${data.filename}" ingested — ${statusData.result?.total_chunks || 0} chunks stored.`);
+                            setIngestJob(null);
+                            fetchDocuments();
+                            break;
+                        } else if (statusData.status === 'failed') {
+                            setError(`✗ Ingestion failed for "${data.filename}": ${statusData.error}`);
+                            setIngestJob(null);
+                            break;
+                        }
+                        // still running — update status display
+                        setIngestJob(prev => prev ? { ...prev, status: 'running' } : null);
+                    } catch { /* ignore poll errors */ }
+                }
+            };
+            poll();  // fire and forget
+
         } catch (err: any) { setError(err.message); }
         finally {
             setUploading(false);
@@ -474,6 +501,14 @@ const RagKnowledgeBasePanel: React.FC = () => {
             </Box>
 
             {uploading && <LinearProgress sx={{ mb: 2, borderRadius: 1 }} />}
+            {ingestJob && (
+    <Alert severity="info" sx={{ mb: 2 }} icon={<CircularProgress size={18} />}>
+        <Typography variant="body2">
+            Ingestion in progress: "{ingestJob.filename}" — Job {ingestJob.jobId}.
+            You can freely use other features. This panel will auto-refresh when done.
+        </Typography>
+    </Alert>
+)}
             {error   && <Alert severity="error"   onClose={() => setError('')}   sx={{ mb: 2 }}>{error}</Alert>}
             {success && <Alert severity="success" onClose={() => setSuccess('')} sx={{ mb: 2 }}>{success}</Alert>}
 
