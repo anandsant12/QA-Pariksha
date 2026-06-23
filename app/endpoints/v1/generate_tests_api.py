@@ -517,9 +517,19 @@ async def generate_testcases(
                             next_head = f"[Next page head]:\n{next_full[:400].strip()}"
                     context_window = "\n\n".join(filter(None, [prev_tail, next_head]))
 
+                # Combine: requirement descriptions as focused instructions
+                # + original full page text as the content source
+                combined_page_text = (
+                    f"## REQUIREMENTS TO TEST (from Requirements Traceability Matrix)\n"
+                    f"Generate test cases ONLY for the following selected requirements:\n\n"
+                    f"{req_block}\n\n"
+                    f"## FULL PAGE CONTENT (source document — use this for field specs, tables, exact values)\n"
+                    f"{page_text_for_rag}"
+                )
+
                 result = generate_testcases_for_page_rag(
                     page_number                     = page_num,
-                    page_text                       = req_block,  # ONLY the selected requirements
+                    page_text                       = combined_page_text,
                     document_name                   = request.document_name,
                     rag_chunks                      = rag_chunks,
                     user_prompt                     = up_prompt,
