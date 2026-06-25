@@ -4233,8 +4233,16 @@ Do NOT generate test cases from rag_context, context_window, or already_generate
 - Configurations , AS-IS Process / Existing Process, Wireframes / proposed screens ,To-Be Process / Proposed process / solution  only , Key Benefits , User roles ,Common Fields, specific fields, additional fields,Settlement, generic flow, accounting, Entry ,Debit,Credit,Actual Funds Transfer, Nature, When these happened
 - Changes, additional changes , frontend alerts, error codes, implementation plan, Digital Signature and Encryption ,Technical Specifications,Programs Affected , Payment advice,Charge Recovery,
 - Generate seperate testcases per each functionality
+9. ORDERING RULE — CRITICAL: Order test cases by FUNCTIONAL FLOW, not by test type.
+   Correct order: [Login-Positive, Login-Negative, Login-Exceptional, Dashboard-Positive, Dashboard-Negative...]
+   Wrong order:   [Login-Positive, Dashboard-Positive, Transfer-Positive, Login-Negative, Dashboard-Negative...]
+   Follow the sequence in which features appear in the document, top to bottom.
+   Within each feature: Positive first, then Negative, then Exceptional.
+10. Test Case ID MUST follow format TC_P{page_number}_NNN exactly.
+    Example for page 5: TC_P5_001, TC_P5_002, TC_P5_003
+    NEVER use TC_001 format — the page number prefix is mandatory for flow ordering.
 
-{schema_block}
+    {schema_block}
 
 Return ONLY a valid JSON array starting with [ and ending with ]. No markdown, no explanation."""
 
