@@ -1587,6 +1587,8 @@ def retrieve_rag_chunks_for_page(
     page_text: str,
     top_k:     int                 = PAGE_RAG_TOP_K,
     doc_ids:   Optional[List[str]] = None,
+    department_id:    Optional[str]       = None,
+    application_name: Optional[str]       = None,
 ) -> List[Dict]:
     """
     Hierarchical RAG retrieval:
@@ -1626,10 +1628,49 @@ def retrieve_rag_chunks_for_page(
         return []
 
     # ── Build where filter ────────────────────────────────────────────────────
-    where_filter = None
+    # Always scope by department — never search across all departments
+    filters = []
+
     if doc_ids:
-        doc_filter = {"doc_id": doc_ids[0]} if len(doc_ids) == 1 else {"doc_id": {"$in": doc_ids}}
-        where_filter = doc_filter
+        if len(doc_ids) == 1:
+            filters.append({"doc_id": doc_ids[0]})
+        else:
+            filters.append({"doc_id": {"$in": doc_ids}})
+
+    if department_id and str(department_id).strip():
+        clean_dept = re.sub(r"[^a-zA-Z0-9]", "", str(department_id))[:20]
+        filters.append({"department_id": clean_dept})
+
+    if application_name and str(application_name).strip():
+        filters.append({"application_name": application_name.strip()})
+
+    if len(filters) == 0:
+        where_filter = None   # admin case — search all
+    elif len(filters) == 1:
+        where_filter = filters[0]
+    else:
+        where_filter = {"$and": filters}
+
+    print(f"  📚 RAG scope: dept={department_id or 'all'} "
+          f"app={application_name or 'none'} "
+          f"doc_ids={doc_ids or 'all'}")
+
+
+    # ── Early exit: check if any chunks exist for this dept/app scope ─────────
+    if department_id and str(department_id).strip():
+        try:
+            scope_check = col.get(
+                where   = where_filter,
+                include = [],
+                limit   = 1,
+            )
+            if not scope_check.get("ids"):
+                print(f"  📚 RAG: no ingested documents found for "
+                      f"dept={department_id} app={application_name or 'any'} "
+                      f"— skipping retrieval entirely")
+                return []
+        except Exception as e:
+            print(f"  📚 RAG: scope check failed ({e}) — proceeding with query")
 
     # ── Strip boilerplate from query ──────────────────────────────────────────
     _BOILERPLATE_PATTERNS = [
@@ -1730,20 +1771,27 @@ def retrieve_rag_chunks_for_page(
             # Batch fetch parents using parent_id metadata filter
             for pid in parent_ids[:RERANK_TOP_K * 2]:   # cap to avoid too many fetches
                 try:
-                    parent_filter = {"parent_id": pid, "chunk_level": "parent"}
+                    # Build parent filter combining all scope constraints
+                    parent_conditions = [
+                        {"parent_id"  : pid},
+                        {"chunk_level": "parent"},
+                    ]
                     if doc_ids:
                         if len(doc_ids) == 1:
-                            parent_filter = {"$and": [
-                                {"doc_id": doc_ids[0]},
-                                {"parent_id": pid},
-                                {"chunk_level": "parent"},
-                            ]}
+                            parent_conditions.append({"doc_id": doc_ids[0]})
                         else:
-                            parent_filter = {"$and": [
-                                {"doc_id": {"$in": doc_ids}},
-                                {"parent_id": pid},
-                                {"chunk_level": "parent"},
-                            ]}
+                            parent_conditions.append({"doc_id": {"$in": doc_ids}})
+                    if department_id and str(department_id).strip():
+                        clean_dept = re.sub(r"[^a-zA-Z0-9]", "", str(department_id))[:20]
+                        parent_conditions.append({"department_id": clean_dept})
+                    if application_name and str(application_name).strip():
+                        parent_conditions.append({"application_name": application_name.strip()})
+
+                    parent_filter = (
+                        {"$and": parent_conditions}
+                        if len(parent_conditions) > 1
+                        else parent_conditions[0]
+                    )
 
                     p_result = col.get(
                         where   = parent_filter,
