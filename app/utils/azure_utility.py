@@ -195,8 +195,10 @@ For each pair of test cases:
 ## Keep One, Remove Others
 
 When you find TRUE duplicates (rare):
-- Keep the test case with more detailed description and steps
-- Remove the less detailed one(s)
+- ALWAYS keep the test case with the LOWER index number (earlier in the list)
+- Remove the higher-index duplicate(s)
+- This preserves the document flow order
+- Do NOT keep a later test case over an earlier one, even if it seems more detailed
 
 ## Output Format
 
@@ -357,13 +359,53 @@ def process_and_clean_testcases(result):
         result["summary"]["cleaned_testcase_count"] = original_count
         result["summary"]["duplicates_removed"] = 0
    
-    # Renumber Test Case IDs in sequence
-    print(f"\n🔄 Renumbering Test Case IDs...")
+
+    # ── Sort by page order + functional flow before renumbering ──────────────
+    print(f"\n🔄 Sorting test cases by document flow order…")
+
+    def _flow_sort_key(tc: dict) -> tuple:
+        """
+        Sort key that preserves document flow:
+        Primary   — page number (extracted from TC ID like TC_P5_003 → 5)
+        Secondary — original index within page (the _003 part → 3)
+        Tertiary  — test type order (Positive=0, Negative=1, Exceptional=2)
+        """
+        tc_id = str(tc.get("Test Case ID", "") or tc.get("Sr.No", ""))
+
+        # Extract page number from ID like TC_P5_003 or TC_P12_007
+        page_match = re.search(r"TC_P(\d+)_(\d+)", tc_id)
+        if page_match:
+            page_num  = int(page_match.group(1))
+            seq_num   = int(page_match.group(2))
+        else:
+            # Already renumbered or different format — preserve current order
+            seq_match = re.search(r"(\d+)", tc_id)
+            page_num  = 999
+            seq_num   = int(seq_match.group(1)) if seq_match else 999
+
+        # Test type ordering: Positive before Negative before Exceptional
+        tc_type = str(
+            tc.get("Type") or
+            tc.get("Positive / Negative") or
+            ""
+        ).lower()
+        type_order = 0 if "positive" in tc_type else (1 if "negative" in tc_type else 2)
+
+        return (page_num, seq_num, type_order)
+
+    import re as _re_sort
+    try:
+        result["combined_testcases"].sort(key=_flow_sort_key)
+        print(f"✓ Test cases sorted by document flow order")
+    except Exception as e:
+        print(f"⚠ Sort failed ({e}) — preserving existing order")
+
+    # ── Renumber after sorting ────────────────────────────────────────────────
+    print(f"🔄 Renumbering Test Case IDs…")
     for i, tc in enumerate(result["combined_testcases"], start=1):
-        # Format as TC_001, TC_002, TC_003, etc.
-        new_id = f"TC_{i:03d}"
-        tc["Test Case ID"] = new_id
-   
+        tc["Test Case ID"] = f"TC_{i:03d}"
+
     print(f"✓ Test Case IDs renumbered: TC_001 to TC_{len(result['combined_testcases']):03d}")
+   
    
     return result
