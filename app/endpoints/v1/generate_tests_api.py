@@ -324,6 +324,10 @@ async def generate_testcases(
         if tc_type not in ("UAT", "SIT"):
             tc_type = "UAT"
 
+        # Resolve department and application for RAG scoping
+        user_dept    = getattr(current_user, "departmentid", None) or ""
+        user_app     = getattr(current_user, "application_name", None) or ""
+
         print(f"\n{'='*60}")
         print(f"Generate request for UUID : {request.uuid}")
         print(f"Requested by              : {current_user.email}  role={current_user.role}")
@@ -560,6 +564,8 @@ async def generate_testcases(
                     rag_query,
                     top_k=PAGE_RAG_TOP_K,
                     doc_ids=None,
+                    department_id    = user_dept,
+                    application_name = user_app,
                 )
                 for c in rag_chunks:
                     key = c["text"]
@@ -689,6 +695,8 @@ async def generate_testcases(
                     rag_query,
                     top_k   = PAGE_RAG_TOP_K,
                     doc_ids = request.rag_doc_ids or None,
+                    department_id    = user_dept,
+                    application_name = user_app,
                 )
                 for c in rag_chunks:
                     key = c["text"]
