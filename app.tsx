@@ -27,7 +27,6 @@ import AdminPanel from './components/AdminPanel';
 // ============================================================================
 const ENABLE_REGISTER_TAB = true;
 const GENERATE_FEATURE_FILE = true;  
-const RTM_ENABLED = true;  // toggle — set false to disable RTM feature entirely
 
 // Columns to hide from the results table (lowercase keys as they appear in JSON)
 const HIDDEN_RESULT_COLUMNS = new Set(['document_name', 'Document Name']);
@@ -208,28 +207,6 @@ export const generateFeatureFile = async (payload: {
     return res.json();
 };
 
-// ── RTM ───────────────────────────────────────────────────────────────────────
-export interface RTMRequirement {
-    id: string;
-    page: number;
-    title: string;
-    description: string;
-    section: string;
-}
-
-export const extractRequirements = async (
-    uuid: string,
-    document_name: string,
-): Promise<{ requirements: RTMRequirement[]; total_pages: number }> => {
-    const res = await fetch(`${API_BASE}/extract-requirements`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ uuid, document_name }),
-    });
-    if (!res.ok) throw new Error((await res.json()).detail || 'Requirement extraction failed');
-    return res.json();
-};
 
 export const pollIngestStatus = async (jobId: string): Promise<{
     status: 'running' | 'done' | 'failed';
@@ -707,82 +684,18 @@ const LoadingSkeleton: React.FC = () => (
 // ============================================================================
 const GeneratePanel: React.FC<{
     pdfData: PDFData;
-    onGenerate: (userPrompt: string, rtmMode: boolean, selectedRequirements: RTMRequirement[] | null) => void;
+    onGenerate: (userPrompt: string) => void;
     userPrompt: string;
     testcaseClient: string;
 }> = ({ pdfData, onGenerate, userPrompt, testcaseClient }) => {
-    const [rtmMode, setRtmMode]                       = useState(RTM_ENABLED);
-    const [requirements, setRequirements]             = useState<RTMRequirement[]>([]);
-    const [selectedReqIds, setSelectedReqIds]         = useState<Set<string>>(new Set());
-    const [rtmLoading, setRtmLoading]                 = useState(false);
-    const [rtmError, setRtmError]                     = useState('');
-    const [rtmExtracted, setRtmExtracted]             = useState(false);
-
-    // Group requirements by section for display
-    const reqsBySection: Record<string, RTMRequirement[]> = {};
-    requirements.forEach(r => {
-        const s = r.section || 'General';
-        if (!reqsBySection[s]) reqsBySection[s] = [];
-        reqsBySection[s].push(r);
-    });
-
-    const allSelected  = requirements.length > 0 && selectedReqIds.size === requirements.length;
-    const noneSelected = selectedReqIds.size === 0;
-
-    const toggleAll = () => {
-        if (allSelected) setSelectedReqIds(new Set());
-        else setSelectedReqIds(new Set(requirements.map(r => r.id)));
-    };
-
-    const toggleOne = (id: string) => {
-        setSelectedReqIds(prev => {
-            const next = new Set(prev);
-            next.has(id) ? next.delete(id) : next.add(id);
-            return next;
-        });
-    };
-
-    const toggleSection = (sectionReqs: RTMRequirement[]) => {
-        const ids = sectionReqs.map(r => r.id);
-        const allIn = ids.every(id => selectedReqIds.has(id));
-        setSelectedReqIds(prev => {
-            const next = new Set(prev);
-            if (allIn) ids.forEach(id => next.delete(id));
-            else ids.forEach(id => next.add(id));
-            return next;
-        });
-    };
-
-    const handleExtractRequirements = async () => {
-        setRtmLoading(true);
-        setRtmError('');
-        try {
-            const data = await extractRequirements(pdfData.uuid, pdfData.filename);
-            setRequirements(data.requirements);
-            setSelectedReqIds(new Set(data.requirements.map(r => r.id)));
-            setRtmExtracted(true);
-        } catch (err: any) {
-            setRtmError(err.message || 'Failed to extract requirements');
-        } finally {
-            setRtmLoading(false);
-        }
-    };
-
-    const handleGenerate = () => {
-        if (rtmMode && rtmExtracted) {
-            const selected = requirements.filter(r => selectedReqIds.has(r.id));
-            onGenerate(userPrompt, true, selected.length > 0 ? selected : null);
-        } else {
-            onGenerate(userPrompt, false, null);
-        }
-    };
-
     return (
         <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', textAlign: 'center', px: 4 }}>
             <AutoAwesome sx={{ fontSize: 80, color: '#1aa7d1', mb: 3, opacity: 0.8 }} />
             <Typography variant="h5" sx={{ fontWeight: 700, color: '#0f172a', mb: 1 }}>Ready to Generate</Typography>
             <Typography variant="body1" color="text.secondary" sx={{ mb: 3, maxWidth: 500 }}>
                 <strong>{pdfData.filename}</strong> has been processed ({pdfData.total_pages} pages).
+                The system will extract text and images, retrieve domain context from the knowledge
+                base if available, then generate <strong>{testcaseClient}</strong> test cases and remove duplicates.
             </Typography>
 
             <Box sx={{ display: 'flex', gap: 2, mb: 4, flexWrap: 'wrap', justifyContent: 'center' }}>
@@ -791,245 +704,21 @@ const GeneratePanel: React.FC<{
                 {userPrompt.trim() && <Chip label="Custom instructions ✓" color="info" variant="outlined" size="small" />}
             </Box>
 
-            {/* ── RTM Toggle ── */}
-            {RTM_ENABLED && (
-                <Box sx={{ width: '100%', maxWidth: 620, mb: 3, textAlign: 'left' }}>
-                    <Box
-                        sx={{
-                            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                            p: 2, border: 2, borderRadius: 2,
-                            borderColor: rtmMode ? '#1aa7d1' : 'grey.300',
-                            bgcolor: rtmMode ? '#F4FCFF' : 'transparent',
-                            cursor: 'pointer', transition: 'all 0.2s',
-                            '&:hover': { borderColor: '#1aa7d1' },
-                        }}
-                        onClick={() => { setRtmMode(!rtmMode); setRtmExtracted(false); setRequirements([]); setSelectedReqIds(new Set()); }}
-                    >
-                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
-                            <Box sx={{
-                                width: 44, height: 24, borderRadius: 12,
-                                bgcolor: rtmMode ? '#1aa7d1' : 'grey.400',
-                                position: 'relative', transition: 'background 0.2s', flexShrink: 0,
-                            }}>
-                                <Box sx={{
-                                    position: 'absolute', top: 3, left: rtmMode ? 23 : 3,
-                                    width: 18, height: 18, borderRadius: '50%', bgcolor: 'white',
-                                    transition: 'left 0.2s', boxShadow: 1,
-                                }} />
-                            </Box>
-                            <Box>
-                                <Typography variant="body2" sx={{ fontWeight: 700, color: rtmMode ? '#1f3c88' : 'text.primary' }}>
-                                    RTM Mode (Requirements Traceability Matrix)
-                                </Typography>
-                                <Typography variant="caption" color="text.secondary">
-                                    {rtmMode
-                                        ? 'Extract requirements first, select which ones to test, then generate'
-                                        : 'Standard mode — generate test cases from all pages directly'}
-                                </Typography>
-                            </Box>
-                        </Box>
-                        <Chip
-                            label={rtmMode ? 'ON' : 'OFF'}
-                            size="small"
-                            color={rtmMode ? 'primary' : 'default'}
-                            sx={{ fontWeight: 700 }}
-                        />
-                    </Box>
-                </Box>
-            )}
-
-            {/* ── RTM Step 1: Extract button — shown only before extraction ── */}
-            {rtmMode && !rtmExtracted && (
-                <Box sx={{ width: '100%', maxWidth: 620, mb: 3, textAlign: 'left' }}>
-                    <Alert severity="info" sx={{ mb: 2 }}>
-                        <Typography variant="body2">
-                            <strong>Step 1:</strong> Analyze the document and extract all testable requirements.
-                            You can then select which ones to generate test cases for.
-                        </Typography>
-                    </Alert>
-                    {rtmError && <Alert severity="error" sx={{ mb: 2 }}>{rtmError}</Alert>}
-                    <Button
-                        variant="contained"
-                        fullWidth
-                        onClick={handleExtractRequirements}
-                        disabled={rtmLoading}
-                        startIcon={rtmLoading ? <CircularProgress size={18} color="inherit" /> : <AutoAwesome />}
-                        sx={{
-                            background: 'linear-gradient(135deg, #1aa7d1 0%, #1f3c88 100%)',
-                            py: 1.5, fontWeight: 700, textTransform: 'none', borderRadius: 2,
-                        }}
-                    >
-                        {rtmLoading ? 'Analyzing document — this may take 1–2 minutes…' : 'Extract Requirements from Document'}
-                    </Button>
-                </Box>
-            )}
-
-            {/* ── RTM Step 2: Requirements selector — shown after extraction ── */}
-            {rtmMode && rtmExtracted && requirements.length > 0 && (
-                <Box sx={{ width: '100%', maxWidth: 720, mb: 3, textAlign: 'left' }}>
-                    <Alert severity="success" sx={{ mb: 2, py: 0.5 }}>
-                        <Typography variant="body2">
-                            <strong>Step 2:</strong> Found <strong>{requirements.length}</strong> testable requirements.
-                            Select which ones you want test cases for, then click Generate.
-                        </Typography>
-                    </Alert>
-
-                    <Box sx={{ border: '1px solid #1aa7d1', borderRadius: 2, bgcolor: '#F4FCFF', overflow: 'hidden' }}>
-                        {/* Select All header */}
-                        <Box sx={{
-                            display: 'flex', alignItems: 'center',
-                            px: 1.5, py: 1, bgcolor: '#d6eef8',
-                            borderBottom: '1px solid #1aa7d1',
-                        }}>
-                            <Checkbox
-                                checked={allSelected}
-                                indeterminate={!allSelected && !noneSelected}
-                                onChange={toggleAll}
-                                size="small"
-                                sx={{ color: '#1aa7d1', '&.Mui-checked': { color: '#1aa7d1' }, '&.MuiCheckbox-indeterminate': { color: '#1aa7d1' } }}
-                            />
-                            <Typography variant="caption" sx={{ fontWeight: 700, color: '#1f3c88', flex: 1 }}>
-                                {allSelected ? 'Deselect All' : noneSelected ? 'Select All' : `${selectedReqIds.size} of ${requirements.length} selected`}
-                            </Typography>
-                            <Typography variant="caption" color="text.secondary">
-                                {Object.keys(reqsBySection).length} section(s)
-                            </Typography>
-                        </Box>
-
-                        {/* Requirements grouped by section */}
-                        <Box sx={{
-                            maxHeight: 420, overflowY: 'auto', overflowX: 'hidden',
-                            '&::-webkit-scrollbar': { width: 6 },
-                            '&::-webkit-scrollbar-thumb': { bgcolor: '#1aa7d1', borderRadius: 3 },
-                        }}>
-                            {Object.entries(reqsBySection).map(([section, sectionReqs]) => {
-                                const sectionIds    = sectionReqs.map(r => r.id);
-                                const allSectionIn  = sectionIds.every(id => selectedReqIds.has(id));
-                                const someSectionIn = sectionIds.some(id => selectedReqIds.has(id));
-                                return (
-                                    <Box key={section}>
-                                        {/* Section header */}
-                                        <Box sx={{
-                                            display: 'flex', alignItems: 'center',
-                                            px: 1.5, py: 0.75, bgcolor: '#eaf6fc',
-                                            borderBottom: '1px solid #c8e6f5',
-                                            position: 'sticky', top: 0, zIndex: 1,
-                                        }}>
-                                            <Checkbox
-                                                checked={allSectionIn}
-                                                indeterminate={!allSectionIn && someSectionIn}
-                                                onChange={() => toggleSection(sectionReqs)}
-                                                size="small"
-                                                sx={{ color: '#1aa7d1', '&.Mui-checked': { color: '#1aa7d1' } }}
-                                            />
-                                            <Typography variant="caption" sx={{ fontWeight: 700, color: '#1f3c88' }}>
-                                                {section}
-                                            </Typography>
-                                            <Typography variant="caption" color="text.secondary" sx={{ ml: 1 }}>
-                                                ({sectionReqs.length})
-                                            </Typography>
-                                        </Box>
-
-                                        {/* Requirements in this section */}
-                                        {sectionReqs.map((req, idx) => (
-                                            <Box
-                                                key={req.id}
-                                                onClick={() => toggleOne(req.id)}
-                                                sx={{
-                                                    display: 'flex', alignItems: 'flex-start',
-                                                    px: 1.5, py: 0.75, cursor: 'pointer',
-                                                    borderBottom: idx < sectionReqs.length - 1 ? '1px solid #e3f2fd' : 'none',
-                                                    bgcolor: selectedReqIds.has(req.id) ? 'transparent' : 'rgba(0,0,0,0.02)',
-                                                    '&:hover': { bgcolor: '#dff0fb' },
-                                                    transition: 'background-color 0.15s',
-                                                    gap: 1,
-                                                }}
-                                            >
-                                                <Checkbox
-                                                    checked={selectedReqIds.has(req.id)}
-                                                    onChange={() => toggleOne(req.id)}
-                                                    onClick={e => e.stopPropagation()}
-                                                    size="small"
-                                                    sx={{ p: 0.5, flexShrink: 0, mt: 0.25, color: '#1aa7d1', '&.Mui-checked': { color: '#1aa7d1' } }}
-                                                />
-                                                <Box sx={{ flex: 1, minWidth: 0 }}>
-                                                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
-                                                        <Chip label={req.id} size="small" variant="outlined"
-                                                            sx={{ fontSize: '0.6rem', height: 16, color: '#1aa7d1', borderColor: '#1aa7d1', flexShrink: 0 }} />
-                                                        <Chip label={`P${req.page}`} size="small"
-                                                            sx={{ fontSize: '0.6rem', height: 16, bgcolor: '#f0f4ff', flexShrink: 0 }} />
-                                                        <Typography variant="caption" sx={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                                            {req.title}
-                                                        </Typography>
-                                                    </Box>
-                                                    <Typography variant="caption" color="text.secondary"
-                                                        sx={{ display: 'block', mt: 0.25, fontSize: '0.68rem',
-                                                              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                                        {req.description.slice(0, 140)}{req.description.length > 140 ? '…' : ''}
-                                                    </Typography>
-                                                </Box>
-                                            </Box>
-                                        ))}
-                                    </Box>
-                                );
-                            })}
-                        </Box>
-
-                        {/* Footer summary */}
-                        <Box sx={{ px: 1.5, py: 0.75, bgcolor: '#eaf6fc', borderTop: '1px solid #c8e6f5' }}>
-                            <Typography variant="caption" color="text.secondary">
-                                {noneSelected
-                                    ? '⚠️ No requirements selected — please select at least one'
-                                    : `✅ ${selectedReqIds.size} requirement(s) selected`}
-                            </Typography>
-                        </Box>
-                    </Box>
-                </Box>
-            )}
-
-            {/* ── RTM: no requirements found after extraction ── */}
-            {rtmMode && rtmExtracted && requirements.length === 0 && (
-                <Alert severity="warning" sx={{ mb: 3, maxWidth: 620, textAlign: 'left' }}>
-                    No testable requirements were found. Try switching to standard mode.
-                </Alert>
-            )}
-
-            {/* ── Info alert ── */}
-            <Alert severity="info" sx={{ mb: 4, maxWidth: 560, textAlign: 'left' }}>
+            <Alert severity="info" sx={{ mb: 4, maxWidth: 520, textAlign: 'left' }}>
                 <Typography variant="body2">
-                    {rtmMode
-                        ? '💡 RTM mode sends selected requirements + full page content to the LLM for precise, traceable test case generation.'
-                        : '💡 Standard mode generates test cases page-by-page from the full document.'}
-                    {' '}RAG context is retrieved from all ingested documents for your department automatically.
+                    💡 RAG context is automatically retrieved from ingested documents for your department, if any exist.
                 </Typography>
             </Alert>
 
-            {/* ── Generate button — hidden in RTM mode until requirements are extracted ── */}
-            {(!rtmMode || rtmExtracted) && (
-                <Button
-                    variant="contained"
-                    size="large"
-                    onClick={handleGenerate}
-                    disabled={rtmMode && noneSelected}
-                    startIcon={<AutoAwesome />}
-                    sx={{
-                        background: 'linear-gradient(135deg, #1aa7d1 0%, #1f3c88 100%)',
-                        py: 2, px: 6, fontSize: '1.1rem', fontWeight: 700,
-                        textTransform: 'none', borderRadius: 3,
-                        boxShadow: '0 4px 20px rgba(31,60,136,0.4)',
-                        '&:hover': { background: 'linear-gradient(135deg, #1f3c88 0%, #1aa7d1 100%)' },
-                        '&:disabled': { opacity: 0.5 },
-                    }}
-                >
-                    Generate Testcases — {testcaseClient}
-                    {rtmMode && !noneSelected && (
-                        <Typography component="span" variant="caption"
-                            sx={{ ml: 1.5, opacity: 0.85, fontWeight: 400 }}>
-                            ({selectedReqIds.size} requirements)
-                        </Typography>
-                    )}
-                </Button>
-            )}
+            <Button
+                variant="contained"
+                size="large"
+                onClick={() => onGenerate(userPrompt)}
+                startIcon={<AutoAwesome />}
+                sx={{ background: 'linear-gradient(135deg, #1aa7d1 0%, #1f3c88 100%)', py: 2, px: 6, fontSize: '1.1rem', fontWeight: 700, textTransform: 'none', borderRadius: 3, boxShadow: '0 4px 20px rgba(31,60,136,0.4)', '&:hover': { background: 'linear-gradient(135deg, #1f3c88 0%, #1aa7d1 100%)' } }}
+            >
+                Generate Testcases — {testcaseClient}
+            </Button>
         </Box>
     );
 };
@@ -1479,11 +1168,7 @@ const MainApp: React.FC<{ user: User; onLogout: () => void }> = ({ user, onLogou
     const isAdmin        = user.role === 'admin';
     const testcaseClient = (user.testcase_client || 'UAT').toUpperCase();
 
-    const handleGenerate = async (
-        prompt: string,
-        rtmMode: boolean,
-        selectedRequirements: RTMRequirement[] | null,
-    ) => {
+    const handleGenerate = async (prompt: string) => {
         if (!pdfData) { alert('Upload a document first'); return; }
         setLoading(true);
         try {
@@ -1491,9 +1176,7 @@ const MainApp: React.FC<{ user: User; onLogout: () => void }> = ({ user, onLogou
                 uuid: pdfData.uuid,
                 document_name: pdfData.filename,
                 user_prompt: prompt || null,
-                rag_doc_ids: null,    // always null — backend handles dept filtering
-                rtm_mode: rtmMode,
-                selected_requirements: selectedRequirements,
+                rag_doc_ids: null,
             });
             setResult(res);
         } catch (err: any) { alert('Error: ' + (err.message || 'Generation failed')); }
