@@ -311,10 +311,11 @@ async def generate_testcases(
       6.  For each page:
             a. detect_page_structure()       — regex, zero LLM cost.
             b. build_windowed_context()      — prev_tail + current + next_head.
-            c. retrieve_rag_chunks_for_page()— enriched query with tx/screen codes.
+            c. retrieve_rag_chunks_for_page()— scoped to user's dept/application,
+                                                returns [] if no documents ingested.
             d. generate_testcases_for_page_rag() — LLM with structure metadata.
       7.  Combine all page test cases.
-      8.  process_and_clean_testcases() — LLM dedup + renumber.
+      8.  process_and_clean_testcases() — LLM dedup + renumber (flow-ordered).
       9.  Move to completed, save JSON output, update UserActivity.
       10. Return consolidated result.
     """
@@ -325,35 +326,17 @@ async def generate_testcases(
             tc_type = "UAT"
 
         # Resolve department and application for RAG scoping
-        user_dept    = getattr(current_user, "departmentid", None) or ""
-        user_app     = getattr(current_user, "application_name", None) or ""
+        user_dept = getattr(current_user, "departmentid", None) or ""
+        user_app  = getattr(current_user, "application_name", None) or ""
 
         print(f"\n{'='*60}")
         print(f"Generate request for UUID : {request.uuid}")
         print(f"Requested by              : {current_user.email}  role={current_user.role}")
         print(f"Testcase client           : {tc_type}")
-        print(f"RAG doc_ids               : {request.rag_doc_ids}")
+        print(f"Department                : {user_dept or 'none'}")
+        print(f"Application               : {user_app or 'none'}")
         print(f"{'='*60}\n")
 
-        # ── Dept description lookup ───────────────────────────────────────────
-        department_description_map = {
-            "yono2"        : SETTINGS.YONO_2_DESCRIPTION,
-            "trade_finance": SETTINGS.TRADE_FINANCE_DESCRIPTION,
-            "inb"          : SETTINGS.INB_DESCRIPTION,
-            "upi"          : SETTINGS.UPI_DESCRIPTION,
-            "yono_business": SETTINGS.YONO_BUSINESS_DESCRIPTION,
-            "atm"          : SETTINGS.ATM_DESCRIPTION,
-            "iph"          : SETTINGS.IPH_DESCRIPTION,
-            "gbss_plus"    : SETTINGS.GBSS_PLUS_DESCRIPTION,
-            "cbs"          : SETTINGS.CBS_DESCRIPTION,
-            "figs_plus"    : SETTINGS.FIGS_PLUS_DESCRIPTION,
-            "nbc"          : SETTINGS.NBC_DESCRIPTION,
-            "api"          : SETTINGS.API_DESCRIPTION,
-        }
-        selected_dept_desc = department_description_map.get(
-            (request.selected_department or "").strip().lower()
-        )
-        print("selected_dept_desc......................",selected_dept_desc)
         # ── 2. Load from JSON storage ─────────────────────────────────────────
         storage_data = get_file_record(request.uuid)
         if not storage_data:
@@ -391,13 +374,11 @@ async def generate_testcases(
 
             try:
                 with Session(engine) as db_session:
-                    # Check if activity already exists (user clicked Generate twice)
                     existing = db_session.exec(
                         _select(UserActivity).where(UserActivity.uuid == request.uuid)
                     ).first()
 
                     if existing:
-                        # Already exists — reset completion fields for the retry
                         existing.generation_completed    = False
                         existing.generation_completed_at = None
                         existing.output_file_path        = None
@@ -456,7 +437,7 @@ async def generate_testcases(
             move_file_to_status(request.uuid, FAILED_DIR)
             raise HTTPException(422, "No content could be extracted from the document.")
 
-# ── 7. Structure-aware generation — improved pipeline ─────────────────
+        # ── 7. Structure-aware generation ──────────────────────────────────────
         from api.utils.rag_utils import should_skip_page, is_continuation_page
 
         all_testcases:      list  = []
@@ -464,271 +445,118 @@ async def generate_testcases(
         rag_chunks_index:   dict  = {}
         generated_scenarios: list = []   # track scenario names for cross-page dedup
 
-        # ══════════════════════════════════════════════════════════════════════
-        # RTM MODE: generate test cases per selected requirement
-        # ══════════════════════════════════════════════════════════════════════
-        if request.rtm_mode and request.selected_requirements:
-            print(f"\n📋 RTM mode: {len(request.selected_requirements)} requirements across pages")
-
-            from collections import defaultdict
-            reqs_by_page: dict = defaultdict(list)
-            for req in request.selected_requirements:
-                reqs_by_page[req.get("page", 1)].append(req)
-
-            page_text_lookup = {p["page_number"]: p["complete_text"] for p in pages}
-
-            # Pre-merge continuation pages (same as standard mode)
-            merged_pages: list = []
-            skip_next = False
-            for idx, page in enumerate(pages):
-                if skip_next:
+        # Pre-merge continuation pages so requirements are never split across LLM calls
+        merged_pages: list = []
+        skip_next = False
+        for idx, page in enumerate(pages):
+            if skip_next:
+                skip_next = False
+                continue
+            prev_text = pages[idx - 1]["complete_text"] if idx > 0 else ""
+            if idx > 0 and is_continuation_page(page["complete_text"], prev_text):
+                if merged_pages:
+                    last = merged_pages[-1]
+                    last["complete_text"] = (
+                        last["complete_text"] + "\n\n" + page["complete_text"]
+                    )
+                    last["merged"] = True
+                    print(f"   🔗 Page {page['page_number']} merged into page {last['page_number']} (continuation)")
                     skip_next = False
                     continue
-                prev_text = pages[idx - 1]["complete_text"] if idx > 0 else ""
-                if idx > 0 and is_continuation_page(page["complete_text"], prev_text):
-                    if merged_pages:
-                        last = merged_pages[-1]
-                        last["complete_text"] = last["complete_text"] + "\n\n" + page["complete_text"]
-                        last["merged"] = True
-                        continue
-                merged_pages.append(dict(page))
+            merged_pages.append(dict(page))
 
-            # Only process pages that have at least one selected requirement
-            pages_with_reqs = {pn for pn in reqs_by_page}
+        print(f"\n📋 Pages after continuation merge: {len(merged_pages)} (was {len(pages)})")
 
-            # Also include adjacent pages if they contain continuation content
-            expanded_pages = set(pages_with_reqs)
-            for pn in pages_with_reqs:
-                if pn - 1 >= 1:
-                    expanded_pages.add(pn - 1)
-                if pn + 1 <= len(pages):
-                    expanded_pages.add(pn + 1)
+        for idx, page in enumerate(merged_pages):
+            pn        = page["page_number"]
+            page_text = page["complete_text"]
 
-            print(f"   Pages with selected requirements: {sorted(pages_with_reqs)}")
-            print(f"   Total pages to process (with adjacent): {len(expanded_pages)}")
+            print(f"\n{'─'*55}")
+            print(f"🔄 Page {pn}/{len(merged_pages)}  |  extracted chars={len(page_text)}")
 
-            for idx, page in enumerate(merged_pages):
-                pn        = page["page_number"]
-                page_text = page["complete_text"]
+            # Step A — pre-filter boilerplate (zero LLM cost)
+            skip, skip_reason = should_skip_page(page_text)
+            if skip:
+                print(f"   ⏭  Skipped: {skip_reason}")
+                page_results.append({
+                    "page_number": pn, "testcases": [],
+                    "status": "skipped", "error": skip_reason,
+                })
+                continue
 
-                # Skip pages that have no selected requirements
-                # (and are not adjacent context pages)
-                if pn not in expanded_pages:
-                    continue
+            # Step B — detect structure (zero LLM cost, pure regex)
+            page_meta = detect_page_structure(page_text)
+            print(f"   section_type={page_meta['section_type']} "
+                  f"| tx={page_meta['transaction_codes']} "
+                  f"| screens={page_meta['screen_numbers']}")
 
-                # Get selected requirements for this specific page
-                page_reqs = reqs_by_page.get(pn, [])
+            # Step C — build context window (prev_tail + next_head) SEPARATE from page_text
+            prev_tail = ""
+            if idx > 0:
+                prev_full = merged_pages[idx - 1]["complete_text"]
+                if prev_full.strip():
+                    prev_tail = (
+                        f"[Previous page {merged_pages[idx-1]['page_number']} — tail]:\n"
+                        f"{prev_full[-600:].strip()}"
+                    )
+            next_head = ""
+            if idx < len(merged_pages) - 1:
+                next_full = merged_pages[idx + 1]["complete_text"]
+                if next_full.strip():
+                    next_head = (
+                        f"[Next page {merged_pages[idx+1]['page_number']} — head]:\n"
+                        f"{next_full[:400].strip()}"
+                    )
+            context_window = "\n\n".join(filter(None, [prev_tail, next_head]))
 
-                # If this is only an adjacent context page (no reqs), skip generation
-                # but include its text in context_window via normal mechanism
-                if not page_reqs:
-                    continue
+            # Step D — enriched RAG query using structural metadata
+            rag_query_parts = [page_text]
+            if page_meta["transaction_codes"]:
+                rag_query_parts.append("Transaction codes: " + ", ".join(page_meta["transaction_codes"]))
+            if page_meta["screen_numbers"]:
+                rag_query_parts.append("Screen numbers: " + ", ".join(page_meta["screen_numbers"]))
+            rag_query_parts.append(f"Section type: {page_meta['section_type']}")
+            rag_query = " ".join(rag_query_parts)
 
-                skip, skip_reason = should_skip_page(page_text)
-                if skip:
-                    print(f"   ⏭  Page {pn} skipped: {skip_reason}")
-                    page_results.append({
-                        "page_number": pn, "testcases": [],
-                        "status": "skipped", "error": skip_reason,
-                    })
-                    continue
+            # RAG retrieval — strictly scoped to user's department/application.
+            # Returns [] automatically if no documents are ingested for this scope.
+            rag_chunks = retrieve_rag_chunks_for_page(
+                rag_query,
+                top_k            = PAGE_RAG_TOP_K,
+                doc_ids          = None,
+                department_id    = user_dept,
+                application_name = user_app,
+            )
+            for c in rag_chunks:
+                key = c["text"]
+                if key not in rag_chunks_index:
+                    rag_chunks_index[key] = c
 
-                print(f"\n{'─'*55}")
-                print(f"🔄 RTM Page {pn}: {len(page_reqs)} requirement(s) selected")
-                for r in page_reqs:
-                    print(f"   • {r['id']}: {r['title'][:70]}")
-
-                page_meta = detect_page_structure(page_text)
-
-                # Build context window
-                prev_tail, next_head = "", ""
-                if idx > 0:
-                    pt = merged_pages[idx - 1]["complete_text"]
-                    if pt.strip():
-                        prev_tail = f"[Previous page {merged_pages[idx-1]['page_number']} — tail]:\n{pt[-600:].strip()}"
-                if idx < len(merged_pages) - 1:
-                    nt = merged_pages[idx + 1]["complete_text"]
-                    if nt.strip():
-                        next_head = f"[Next page {merged_pages[idx+1]['page_number']} — head]:\n{nt[:400].strip()}"
-                context_window = "\n\n".join(filter(None, [prev_tail, next_head]))
-
-                # RAG query: use page text enriched with transaction/screen codes
-                rag_query_parts = [page_text]
-                if page_meta["transaction_codes"]:
-                    rag_query_parts.append("Transaction codes: " + ", ".join(page_meta["transaction_codes"]))
-                if page_meta["screen_numbers"]:
-                    rag_query_parts.append("Screen numbers: " + ", ".join(page_meta["screen_numbers"]))
-                rag_query = " ".join(rag_query_parts)
-
-                rag_chunks = retrieve_rag_chunks_for_page(
-                    rag_query,
-                    top_k=PAGE_RAG_TOP_K,
-                    doc_ids=None,
-                    department_id    = user_dept,
-                    application_name = user_app,
-                )
-                for c in rag_chunks:
-                    key = c["text"]
-                    if key not in rag_chunks_index:
-                        rag_chunks_index[key] = c
-
-                # Build the RTM requirement block for this page
-                req_block = "\n".join(
-                    f"  • [{r['id']}] {r['title']}: {r['description']}"
-                    for r in page_reqs
-                )
-
-                # Compose focused page text:
-                # Requirements list tells LLM what to focus on
-                # Full page text gives all field specs, tables, exact values
-                focused_text = (
-                    f"## SELECTED REQUIREMENTS FOR THIS PAGE (generate test cases ONLY for these)\n\n"
-                    f"{req_block}\n\n"
-                    f"## FULL PAGE {pn} CONTENT\n"
-                    f"(Use this for exact field names, lengths, screen numbers, error messages, table values)\n\n"
-                    f"{page_text}"
-                )
-
-                result = generate_testcases_for_page_rag(
-                    page_number                     = pn,
-                    page_text                       = focused_text,
-                    document_name                   = request.document_name,
-                    rag_chunks                      = rag_chunks,
-                    user_prompt                     = up_prompt,
-                    testcase_type                   = tc_type,
-                    page_metadata                   = page_meta,
-                    prompt_file_content             = None,
-                    selected_department_description = selected_dept_desc,
-                    department_id                   = getattr(current_user, "departmentid", None),
-                    context_window                  = context_window,
-                    already_covered                 = list(generated_scenarios),
-                )
-                page_results.append(result)
-                if result["status"] == "success":
-                    all_testcases.extend(result["testcases"])
-                    for tc in result["testcases"]:
-                        sn = tc.get("Scenario Name") or tc.get("Sub Function Description", "")
-                        if sn and sn not in generated_scenarios:
-                            generated_scenarios.append(sn)
-
-        # ══════════════════════════════════════════════════════════════════════
-        # STANDARD MODE: existing per-page pipeline (unchanged)
-        # ══════════════════════════════════════════════════════════════════════
-        else:
-            # Pre-merge continuation pages so requirements are never split across LLM calls
-            merged_pages: list = []
-            skip_next = False
-            for idx, page in enumerate(pages):
-                if skip_next:
-                    skip_next = False
-                    continue
-                prev_text = pages[idx - 1]["complete_text"] if idx > 0 else ""
-                if idx > 0 and is_continuation_page(page["complete_text"], prev_text):
-                    # Merge this continuation into the previous merged page
-                    if merged_pages:
-                        last = merged_pages[-1]
-                        last["complete_text"] = (
-                            last["complete_text"] + "\n\n" + page["complete_text"]
-                        )
-                        last["merged"] = True
-                        print(f"   🔗 Page {page['page_number']} merged into page {last['page_number']} (continuation)")
-                        skip_next = False
-                        continue
-                merged_pages.append(dict(page))  # copy so we don't mutate original
-
-            print(f"\n📋 Pages after continuation merge: {len(merged_pages)} (was {len(pages)})")
-
-            for idx, page in enumerate(merged_pages):
-                pn        = page["page_number"]
-                page_text = page["complete_text"]
-
-                print(f"\n{'─'*55}")
-                print(f"🔄 Page {pn}/{len(merged_pages)}  |  extracted chars={len(page_text)}")
-
-                # Step A — pre-filter boilerplate (zero LLM cost)
-                skip, skip_reason = should_skip_page(page_text)
-                if skip:
-                    print(f"   ⏭  Skipped: {skip_reason}")
-                    page_results.append({
-                        "page_number": pn, "testcases": [],
-                        "status": "skipped", "error": skip_reason,
-                    })
-                    continue
-
-                # Step B — detect structure (zero LLM cost, pure regex)
-                page_meta = detect_page_structure(page_text)
-                print(f"   section_type={page_meta['section_type']} "
-                    f"| tx={page_meta['transaction_codes']} "
-                    f"| screens={page_meta['screen_numbers']}")
-
-                # Step C — build context window (prev_tail + next_head) SEPARATE from page_text
-                # page_text = what LLM generates FROM
-                # context_window = what LLM reads for continuity (read-only)
-                prev_tail = ""
-                if idx > 0:
-                    prev_full = merged_pages[idx - 1]["complete_text"]
-                    if prev_full.strip():
-                        prev_tail = (
-                            f"[Previous page {merged_pages[idx-1]['page_number']} — tail]:\n"
-                            f"{prev_full[-600:].strip()}"
-                        )
-                next_head = ""
-                if idx < len(merged_pages) - 1:
-                    next_full = merged_pages[idx + 1]["complete_text"]
-                    if next_full.strip():
-                        next_head = (
-                            f"[Next page {merged_pages[idx+1]['page_number']} — head]:\n"
-                            f"{next_full[:400].strip()}"
-                        )
-                context_window = "\n\n".join(filter(None, [prev_tail, next_head]))
-
-                # Step D — enriched RAG query using structural metadata
-                rag_query_parts = [page_text]
-                if page_meta["transaction_codes"]:
-                    rag_query_parts.append("Transaction codes: " + ", ".join(page_meta["transaction_codes"]))
-                if page_meta["screen_numbers"]:
-                    rag_query_parts.append("Screen numbers: " + ", ".join(page_meta["screen_numbers"]))
-                rag_query_parts.append(f"Section type: {page_meta['section_type']}")
-                rag_query = " ".join(rag_query_parts)
-
-                rag_chunks = retrieve_rag_chunks_for_page(
-                    rag_query,
-                    top_k   = PAGE_RAG_TOP_K,
-                    doc_ids = request.rag_doc_ids or None,
-                    department_id    = user_dept,
-                    application_name = user_app,
-                )
-                for c in rag_chunks:
-                    key = c["text"]
-                    if key not in rag_chunks_index:
-                        rag_chunks_index[key] = c
-
-                # Step E — generate with SEPARATED concerns:
-                #   page_text       → source for generation
-                #   context_window  → reading context only (passed separately)
-                #   already_covered → prevents regenerating covered scenarios
-                result = generate_testcases_for_page_rag(
-                    page_number                    = pn,
-                    page_text                      = page_text.strip(),   # ONLY current page
-                    document_name                  = request.document_name,
-                    rag_chunks                     = rag_chunks,
-                    user_prompt                    = up_prompt,
-                    testcase_type                  = tc_type,
-                    page_metadata                  = page_meta,
-                    prompt_file_content            = None,
-                    selected_department_description= selected_dept_desc,
-                    department_id                  = getattr(current_user, "departmentid", None),
-                    context_window                 = context_window,          # NEW
-                    already_covered                = list(generated_scenarios),  # NEW
-                )
-                page_results.append(result)
-                if result["status"] == "success":
-                    all_testcases.extend(result["testcases"])
-                    # Track generated scenario names for next pages
-                    for tc in result["testcases"]:
-                        sn = tc.get("Scenario Name") or tc.get("Sub Function Description", "")
-                        if sn and sn not in generated_scenarios:
-                            generated_scenarios.append(sn)
+            # Step E — generate with SEPARATED concerns:
+            #   page_text       → source for generation
+            #   context_window  → reading context only (passed separately)
+            #   already_covered → prevents regenerating covered scenarios
+            result = generate_testcases_for_page_rag(
+                page_number                    = pn,
+                page_text                      = page_text.strip(),
+                document_name                  = request.document_name,
+                rag_chunks                     = rag_chunks,
+                user_prompt                    = up_prompt,
+                testcase_type                  = tc_type,
+                page_metadata                  = page_meta,
+                prompt_file_content            = None,
+                selected_department_description= None,
+                department_id                  = user_dept,
+                context_window                 = context_window,
+                already_covered                = list(generated_scenarios),
+            )
+            page_results.append(result)
+            if result["status"] == "success":
+                all_testcases.extend(result["testcases"])
+                for tc in result["testcases"]:
+                    sn = tc.get("Scenario Name") or tc.get("Sub Function Description", "")
+                    if sn and sn not in generated_scenarios:
+                        generated_scenarios.append(sn)
 
         successful = sum(1 for r in page_results if r["status"] == "success")
         skipped    = sum(1 for r in page_results if r["status"] == "skipped")
@@ -1174,138 +1002,3 @@ async def generate_feature_file_endpoint(
         print(f"Feature file generation error: {traceback.format_exc()}")
         raise HTTPException(500, f"Feature file generation failed: {str(e)}")
 
-
-
-
-# Add this import at the top of generate_tests_api.py
-from pydantic import BaseModel as _BaseModel
-
-class RTMExtractRequest(_BaseModel):
-    uuid: str
-    document_name: str
-
-class RTMRequirement(_BaseModel):
-    id: str          # e.g. "REQ_001"
-    page: int
-    title: str       # short title shown in checkbox
-    description: str # full requirement text sent to LLM during generation
-    section: str     # section heading if detected
-
-
-@testcase_router.post("/extract-requirements")
-async def extract_requirements(
-    request: RTMExtractRequest,
-    current_user: Annotated[User, Depends(get_current_active_user)] = ...,
-):
-    """
-    RTM Phase 1: Extract all testable requirements from the uploaded document.
-    Returns a flat list of requirements the user can select before generation.
-    """
-    storage_data = get_file_record(request.uuid)
-    if not storage_data:
-        raise HTTPException(404, f"File not found for UUID: {request.uuid}. Please upload first.")
-
-    file_path = storage_data["file_path"]
-    with open(file_path, "rb") as fh:
-        file_bytes = fh.read()
-    filename = Path(file_path).name
-
-    import asyncio as _asyncio
-
-    print(f"\n📋 RTM extraction started for {request.document_name}")
-
-    try:
-        pages = await _asyncio.wait_for(
-            _asyncio.get_event_loop().run_in_executor(
-                None, extract_pages_with_images, file_bytes, filename
-            ),
-            timeout=90000,
-        )
-    except Exception as e:
-        raise HTTPException(500, f"Page extraction failed: {e}")
-
-    if not pages:
-        raise HTTPException(422, "No content could be extracted from the document.")
-
-    # Extract requirements from each page in parallel (batched)
-    from api.utils.rag_utils import _az, _CHAT_MODEL, detect_page_structure, should_skip_page
-    import json as _json
-
-    RTM_SYSTEM = """You are a requirements analyst. Extract ALL testable requirements from the given page content.
-A requirement is any statement describing:
-- Functionality the system must provide
-- Validation rules or field constraints  
-- Business rules or conditions
-- User interactions (screens, buttons, navigation)
-- Error handling or exception flows
-- Integration points between systems
-- Status/workflow states
-
-Return ONLY a JSON array. Each object must have:
-{
-  "title": "Short 8-12 word title describing this requirement",
-  "description": "Complete requirement text — include all field names, constraints, conditions, exact values",
-  "section": "Section heading or 'General' if no heading"
-}
-
-Rules:
-- Extract EVERY distinct testable requirement — do not summarize multiple into one
-- One field validation = one requirement
-- One business rule = one requirement  
-- One navigation flow = one requirement
-- If page has no testable requirements (TOC, cover page, metadata only) return []
-- No markdown, no explanation — ONLY valid JSON array"""
-
-    all_requirements = []
-    req_counter = 1
-
-    for page in pages:
-        pn   = page["page_number"]
-        text = page["complete_text"]
-
-        skip, _ = should_skip_page(text)
-        if skip:
-            continue
-
-        try:
-            response = _az.chat.completions.create(
-                model    = _CHAT_MODEL,
-                messages = [
-                    {"role": "system", "content": RTM_SYSTEM},
-                    {"role": "user",   "content": f"Page {pn} content:\n\n{text[:6000]}"},
-                ],
-                temperature = 0.1,
-                max_tokens  = 4000,
-            )
-            raw = (response.choices[0].message.content or "").strip()
-            raw = __import__("re").sub(r"^```(json)?", "", raw, flags=__import__("re").IGNORECASE).strip()
-            raw = __import__("re").sub(r"```$", "", raw).strip()
-
-            page_reqs = _json.loads(raw)
-            if not isinstance(page_reqs, list):
-                continue
-
-            for req in page_reqs:
-                if not isinstance(req, dict) or not req.get("title"):
-                    continue
-                all_requirements.append({
-                    "id"         : f"REQ_{req_counter:03d}",
-                    "page"       : pn,
-                    "title"      : req.get("title", "")[:100],
-                    "description": req.get("description", ""),
-                    "section"    : req.get("section", "General"),
-                })
-                req_counter += 1
-
-        except Exception as e:
-            print(f"  ⚠ RTM extraction failed for page {pn}: {e}")
-            continue
-
-    print(f"✅ RTM extraction complete: {len(all_requirements)} requirements found")
-
-    return {
-        "uuid"        : request.uuid,
-        "document_name": request.document_name,
-        "total_pages" : len(pages),
-        "requirements": all_requirements,
-    }
