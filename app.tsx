@@ -47,6 +47,11 @@ const TF_COLUMNS = [
     "Positive / Negative", 
    ];
 
+// ============================================================================
+// API
+// ============================================================================
+const API_BASE = 'http://localhost:1000/api/v1/testcase-generation';
+
 
 // ============================================================================
 // TYPES
@@ -87,10 +92,18 @@ interface RagDocument {
     application_name?:string;
 }
 
-// ============================================================================
-// API
-// ============================================================================
-const API_BASE = 'http://localhost:1000/api/v1/testcase-generation';
+// ── Testcase category checkboxes ───────────────────────────────────────────
+export interface TestcaseCategory {
+    id: string;
+    label: string;
+}
+
+export const fetchTestcaseCategories = async (): Promise<TestcaseCategory[]> => {
+    const res = await fetch(`${API_BASE}/testcase-categories`, { credentials: 'include' });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.categories || [];
+};
 
 const loginUser = async (username: string, password: string): Promise<User> => {
     const res = await fetch(`${API_BASE}/login`, {
@@ -684,40 +697,170 @@ const LoadingSkeleton: React.FC = () => (
 // ============================================================================
 const GeneratePanel: React.FC<{
     pdfData: PDFData;
-    onGenerate: (userPrompt: string) => void;
+    onGenerate: (userPrompt: string, selectedCheckboxes: string[]) => void;
     userPrompt: string;
     testcaseClient: string;
 }> = ({ pdfData, onGenerate, userPrompt, testcaseClient }) => {
+
+    const [categories, setCategories]         = useState<TestcaseCategory[]>([]);
+    const [selectedIds, setSelectedIds]       = useState<Set<string>>(new Set());
+    const [catLoading, setCatLoading]         = useState(true);
+
+    useEffect(() => {
+        fetchTestcaseCategories().then(cats => {
+            setCategories(cats);
+            // Default: all selected
+            setSelectedIds(new Set(cats.map(c => c.id)));
+        }).finally(() => setCatLoading(false));
+    }, []);
+
+    const allSelected  = categories.length > 0 && selectedIds.size === categories.length;
+    const noneSelected = selectedIds.size === 0;
+
+    const toggleAll = () => {
+        if (allSelected) setSelectedIds(new Set());
+        else setSelectedIds(new Set(categories.map(c => c.id)));
+    };
+
+    const toggleOne = (id: string) => {
+        setSelectedIds(prev => {
+            const next = new Set(prev);
+            next.has(id) ? next.delete(id) : next.add(id);
+            return next;
+        });
+    };
+
+    const handleGenerate = () => {
+        onGenerate(userPrompt, Array.from(selectedIds));
+    };
+
     return (
         <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', textAlign: 'center', px: 4 }}>
             <AutoAwesome sx={{ fontSize: 80, color: '#1aa7d1', mb: 3, opacity: 0.8 }} />
             <Typography variant="h5" sx={{ fontWeight: 700, color: '#0f172a', mb: 1 }}>Ready to Generate</Typography>
             <Typography variant="body1" color="text.secondary" sx={{ mb: 3, maxWidth: 500 }}>
                 <strong>{pdfData.filename}</strong> has been processed ({pdfData.total_pages} pages).
-                The system will extract text and images, retrieve domain context from the knowledge
-                base if available, then generate <strong>{testcaseClient}</strong> test cases and remove duplicates.
+                Select the types of test cases you want generated, then click Generate.
             </Typography>
 
-            <Box sx={{ display: 'flex', gap: 2, mb: 4, flexWrap: 'wrap', justifyContent: 'center' }}>
+            <Box sx={{ display: 'flex', gap: 2, mb: 3, flexWrap: 'wrap', justifyContent: 'center' }}>
                 <Chip label={`${pdfData.total_pages} pages`} color="primary" variant="outlined" />
                 <Chip label={testcaseClient} color={testcaseClient === 'UAT' ? 'success' : 'secondary'} />
                 {userPrompt.trim() && <Chip label="Custom instructions ✓" color="info" variant="outlined" size="small" />}
             </Box>
 
-            <Alert severity="info" sx={{ mb: 4, maxWidth: 520, textAlign: 'left' }}>
+            {/* ── Testcase Category Selector ── */}
+            <Box sx={{ width: '100%', maxWidth: 640, mb: 3, textAlign: 'left' }}>
+                <Typography variant="body2" sx={{ fontWeight: 700, mb: 0.5, color: '#1f3c88' }}>
+                    🎯 Select Test Case Categories
+                </Typography>
+                <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1.5 }}>
+                    Choose which types of test cases to generate. All are selected by default.
+                </Typography>
+
+                {catLoading ? (
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, py: 1 }}>
+                        <CircularProgress size={16} />
+                        <Typography variant="caption" color="text.secondary">Loading categories…</Typography>
+                    </Box>
+                ) : (
+                    <Box sx={{ border: '1px solid #1aa7d1', borderRadius: 2, bgcolor: '#F4FCFF', overflow: 'hidden' }}>
+                        {/* Select All header */}
+                        <Box sx={{
+                            display: 'flex', alignItems: 'center',
+                            px: 1.5, py: 0.75, bgcolor: '#d6eef8',
+                            borderBottom: '1px solid #1aa7d1',
+                        }}>
+                            <Checkbox
+                                checked={allSelected}
+                                indeterminate={!allSelected && !noneSelected}
+                                onChange={toggleAll}
+                                size="small"
+                                sx={{ color: '#1aa7d1', '&.Mui-checked': { color: '#1aa7d1' }, '&.MuiCheckbox-indeterminate': { color: '#1aa7d1' } }}
+                            />
+                            <Typography variant="caption" sx={{ fontWeight: 700, color: '#1f3c88', flex: 1 }}>
+                                {allSelected ? 'Deselect All' : noneSelected ? 'Select All' : `${selectedIds.size} of ${categories.length} selected`}
+                            </Typography>
+                        </Box>
+
+                        {/* 2-column grid of checkboxes */}
+                        <Box sx={{
+                            display: 'grid',
+                            gridTemplateColumns: '1fr 1fr',
+                            maxHeight: 320,
+                            overflowY: 'auto',
+                            '&::-webkit-scrollbar': { width: 6 },
+                            '&::-webkit-scrollbar-thumb': { bgcolor: '#1aa7d1', borderRadius: 3 },
+                        }}>
+                            {categories.map((cat, idx) => (
+                                <Box
+                                    key={cat.id}
+                                    onClick={() => toggleOne(cat.id)}
+                                    sx={{
+                                        display: 'flex', alignItems: 'flex-start',
+                                        px: 1.5, py: 0.75, cursor: 'pointer',
+                                        borderBottom: '1px solid #e3f2fd',
+                                        borderRight: idx % 2 === 0 ? '1px solid #e3f2fd' : 'none',
+                                        bgcolor: selectedIds.has(cat.id) ? 'transparent' : 'rgba(0,0,0,0.02)',
+                                        '&:hover': { bgcolor: '#dff0fb' },
+                                        transition: 'background-color 0.15s',
+                                        gap: 0.75,
+                                    }}
+                                >
+                                    <Checkbox
+                                        checked={selectedIds.has(cat.id)}
+                                        onChange={() => toggleOne(cat.id)}
+                                        onClick={e => e.stopPropagation()}
+                                        size="small"
+                                        sx={{ p: 0.25, mt: 0.1, flexShrink: 0, color: '#1aa7d1', '&.Mui-checked': { color: '#1aa7d1' } }}
+                                    />
+                                    <Typography variant="caption" sx={{ fontWeight: 500, lineHeight: 1.4, fontSize: '0.72rem' }}>
+                                        {cat.label}
+                                    </Typography>
+                                </Box>
+                            ))}
+                        </Box>
+
+                        {/* Footer */}
+                        <Box sx={{ px: 1.5, py: 0.5, bgcolor: '#eaf6fc', borderTop: '1px solid #c8e6f5' }}>
+                            <Typography variant="caption" color="text.secondary">
+                                {noneSelected
+                                    ? '⚠️ No categories selected — select at least one'
+                                    : `✅ ${selectedIds.size} categor${selectedIds.size === 1 ? 'y' : 'ies'} selected`}
+                            </Typography>
+                        </Box>
+                    </Box>
+                )}
+            </Box>
+
+            <Alert severity="info" sx={{ mb: 4, maxWidth: 560, textAlign: 'left' }}>
                 <Typography variant="body2">
                     💡 RAG context is automatically retrieved from ingested documents for your department, if any exist.
+                    Selected categories focus the LLM on generating those specific test case types.
                 </Typography>
             </Alert>
 
             <Button
                 variant="contained"
                 size="large"
-                onClick={() => onGenerate(userPrompt)}
+                onClick={handleGenerate}
+                disabled={noneSelected}
                 startIcon={<AutoAwesome />}
-                sx={{ background: 'linear-gradient(135deg, #1aa7d1 0%, #1f3c88 100%)', py: 2, px: 6, fontSize: '1.1rem', fontWeight: 700, textTransform: 'none', borderRadius: 3, boxShadow: '0 4px 20px rgba(31,60,136,0.4)', '&:hover': { background: 'linear-gradient(135deg, #1f3c88 0%, #1aa7d1 100%)' } }}
+                sx={{
+                    background: 'linear-gradient(135deg, #1aa7d1 0%, #1f3c88 100%)',
+                    py: 2, px: 6, fontSize: '1.1rem', fontWeight: 700,
+                    textTransform: 'none', borderRadius: 3,
+                    boxShadow: '0 4px 20px rgba(31,60,136,0.4)',
+                    '&:hover': { background: 'linear-gradient(135deg, #1f3c88 0%, #1aa7d1 100%)' },
+                    '&:disabled': { opacity: 0.5 },
+                }}
             >
                 Generate Testcases — {testcaseClient}
+                {!noneSelected && !allSelected && (
+                    <Typography component="span" variant="caption" sx={{ ml: 1.5, opacity: 0.85, fontWeight: 400 }}>
+                        ({selectedIds.size} categories)
+                    </Typography>
+                )}
             </Button>
         </Box>
     );
@@ -1168,20 +1311,21 @@ const MainApp: React.FC<{ user: User; onLogout: () => void }> = ({ user, onLogou
     const isAdmin        = user.role === 'admin';
     const testcaseClient = (user.testcase_client || 'UAT').toUpperCase();
 
-    const handleGenerate = async (prompt: string) => {
-        if (!pdfData) { alert('Upload a document first'); return; }
-        setLoading(true);
-        try {
-            const res = await generateTestCases({
-                uuid: pdfData.uuid,
-                document_name: pdfData.filename,
-                user_prompt: prompt || null,
-                rag_doc_ids: null,
-            });
-            setResult(res);
-        } catch (err: any) { alert('Error: ' + (err.message || 'Generation failed')); }
-        finally { setLoading(false); }
-    };
+    const handleGenerate = async (prompt: string, selectedCheckboxes: string[]) => {
+    if (!pdfData) { alert('Upload a document first'); return; }
+    setLoading(true);
+    try {
+        const res = await generateTestCases({
+            uuid: pdfData.uuid,
+            document_name: pdfData.filename,
+            user_prompt: prompt || null,
+            rag_doc_ids: null,
+            selected_checkboxes: selectedCheckboxes.length > 0 ? selectedCheckboxes : null,
+        });
+        setResult(res);
+    } catch (err: any) { alert('Error: ' + (err.message || 'Generation failed')); }
+    finally { setLoading(false); }
+};
 
     const handleReset         = () => { setPdfData(null); setResult(null); setUserPrompt(''); };
     const handleClearDocument = () => { setPdfData(null); setResult(null); setUserPrompt(''); };
