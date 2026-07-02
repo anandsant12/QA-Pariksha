@@ -74,6 +74,147 @@ MMR_FINAL_K               = 10      # return this many after MMR diversification
 MMR_LAMBDA                = 0.5    # 0=max diversity, 1=max relevance
 TRADE_FINANCE_DEPT_ID     = "171"
 YONO_2_DEPT_ID            = "465"
+
+# ── Checkbox-driven prompt fragments ─────────────────────────────────────────
+# Each key matches the checkbox ID sent from the frontend.
+# Value is the instruction appended to the LLM prompt when that checkbox is selected.
+CHECKBOX_PROMPT_MAP: Dict[str, Dict[str, str]] = {
+    "functional_coverage": {
+        "label": "Functional Coverage (Positive, Negative, Boundary & Field Validation)",
+        "prompt": (
+            "FUNCTIONAL COVERAGE: Generate comprehensive Positive test cases (valid inputs, "
+            "happy path, expected successful outcomes), Negative test cases (invalid inputs, "
+            "missing required fields, wrong data types, constraint violations), and Boundary "
+            "Value test cases (exact limit, one below min, one above max, zero, null, empty "
+            "string) for every field, button, and functional element on this page. "
+            "Each field must have separate positive, negative, and boundary test cases — "
+            "never merged into one."
+        ),
+    },
+    "format_validation": {
+        "label": "Format & Data Validation (Email, PAN, dates, account numbers)",
+        "prompt": (
+            "FORMAT & DATA VALIDATION: For every field with a specified format on this page, "
+            "generate test cases verifying: valid format acceptance (e.g. PAN: ABCDE1234F, "
+            "email: user@domain.com, date: DD/MM/YYYY, account: 17 digits), rejection of "
+            "wrong format (e.g. PAN without capital letters, email without @, date as text), "
+            "rejection of partial format (e.g. 16-digit account number), and rejection of "
+            "special characters where not allowed. Use exact format patterns from the document."
+        ),
+    },
+    "business_rules_workflow": {
+        "label": "Business Rules & Workflow (rules, workflow steps, state transitions)",
+        "prompt": (
+            "BUSINESS RULES & WORKFLOW: Generate test cases for every business rule explicitly "
+            "stated in the document (e.g. 'user must have at least one linked account', "
+            "'amount cannot exceed daily limit'). For workflow sequences, generate ONE test "
+            "case per step verifying the step executes correctly, and ONE test case per "
+            "decision branch verifying the correct path is taken. For state transitions "
+            "(e.g. Pending → Active → Closed), generate ONE test case per valid transition "
+            "and ONE per invalid/blocked transition with the expected error."
+        ),
+    },
+    "role_based_access": {
+        "label": "Role-Based Access Control (authentication, authorization, permissions)",
+        "prompt": (
+            "ROLE-BASED ACCESS CONTROL: Generate test cases verifying: each user role "
+            "(as documented) can access only their permitted screens/features, unauthorized "
+            "roles are blocked with appropriate error messages, unauthenticated users are "
+            "redirected to login, users cannot escalate their own privileges, and sensitive "
+            "operations require the correct role. Use role names exactly as documented."
+        ),
+    },
+    "ui_navigation": {
+        "label": "UI & Navigation (screen elements, navigation flows, layout)",
+        "prompt": (
+            "UI & NAVIGATION: For every screen documented, generate test cases verifying: "
+            "all documented UI elements (fields, buttons, labels, menus, breadcrumbs) are "
+            "present and correctly labelled, each navigation thread (source → destination) "
+            "works as ONE complete test case, conditional UI elements show/hide based on "
+            "documented conditions, and error/success messages appear exactly as documented. "
+            "ONE navigation = ONE test case. Never split a navigation into sub-steps."
+        ),
+    },
+    "file_operations": {
+        "label": "File Operations (upload, download, file format & size validation)",
+        "prompt": (
+            "FILE OPERATIONS: Generate test cases for every file upload/download operation "
+            "documented, covering: successful upload of valid file type and size, rejection "
+            "of unsupported file types with error message, rejection of files exceeding max "
+            "size with error message, successful download producing correct file content and "
+            "format, and upload of empty/corrupted files. Use exact file type and size limits "
+            "from the document."
+        ),
+    },
+    "session_security": {
+        "label": "Session & Security (session management, timeout, security checks)",
+        "prompt": (
+            "SESSION & SECURITY: Generate test cases for: session creation after successful "
+            "login, session expiry after documented timeout period, behavior after session "
+            "expiry (redirect to login, data not accessible), logout clearing session data, "
+            "prevention of concurrent sessions if documented, and rejection of expired/invalid "
+            "tokens. Also cover: SQL injection attempts in input fields, XSS in text inputs, "
+            "CSRF protection on state-changing operations."
+        ),
+    },
+    "api_integration": {
+        "label": "API & Integration (frontend/backend APIs, third-party, microservices)",
+        "prompt": (
+            "API & INTEGRATION: For every API or integration point documented, generate test "
+            "cases verifying: successful API call with valid payload returns documented response "
+            "(HTTP status, response fields), API call with invalid/missing parameters returns "
+            "documented error response, third-party service returning error is handled gracefully "
+            "on the UI, and API method/protocol matches specification (GET/POST, HTTPS). "
+            "Use exact endpoint paths, request/response formats, and error codes from the document."
+        ),
+    },
+    "database_integrity": {
+        "label": "Database & Data Integrity (DB operations, transactions, data mapping)",
+        "prompt": (
+            "DATABASE & DATA INTEGRITY: Generate test cases verifying: successful record "
+            "creation/update/deletion reflects correctly in the UI, data entered in UI is "
+            "stored with correct field mapping in the database, mandatory database fields "
+            "are populated (including audit fields like created_at, updated_at, maker_id), "
+            "transaction atomicity (all-or-nothing: if one step fails, none persist), "
+            "and foreign key/unique constraint violations produce correct errors."
+        ),
+    },
+    "error_handling_retry": {
+        "label": "Error Handling & Retry (failure handling, retries, timeouts, error mapping)",
+        "prompt": (
+            "ERROR HANDLING & RETRY: Generate test cases for: documented error conditions "
+            "displaying exact error messages from the specification, system behavior when a "
+            "downstream service is unavailable (graceful degradation, user-friendly message), "
+            "retry behavior for transient failures if documented (correct number of retries, "
+            "backoff), request timeout showing documented timeout message, and error codes "
+            "mapping to correct user-facing messages. Only test error scenarios explicitly "
+            "mentioned or clearly implied by the document."
+        ),
+    },
+    "concurrent_performance": {
+        "label": "Concurrent & Performance (concurrent users, race conditions, load behaviour)",
+        "prompt": (
+            "CONCURRENT & PERFORMANCE: Generate test cases for: simultaneous operations by "
+            "multiple users on the same record (last-write-wins or lock behavior as documented), "
+            "duplicate submission prevention (double-click on submit button), race conditions "
+            "in state transitions (two users changing the same record simultaneously), and "
+            "screen/API load time meeting any documented performance SLA. Only generate these "
+            "if concurrency or performance requirements are explicitly mentioned in the document."
+        ),
+    },
+    "logging_audit_migration": {
+        "label": "Logging, Audit & Migration (audit trails, monitoring, data migration)",
+        "prompt": (
+            "LOGGING, AUDIT & MIGRATION: Generate test cases for: audit trail entries created "
+            "for every documented state-changing operation (with correct user, timestamp, "
+            "before/after values), log entries generated for documented events (errors, "
+            "logins, key actions), monitoring alerts triggered for documented threshold "
+            "breaches, and data migration correctness (migrated records match source data, "
+            "no data loss, correct field mapping). Only generate where explicitly documented."
+        ),
+    },
+}
+
 INGEST_SPLIT_THRESHOLD = 200   # pages — split PDFs larger than this before ingesting
 RAG_MIN_RELEVANCE_SCORE = 0.55
 
@@ -3349,8 +3490,9 @@ def _build_page_prompt(
     prompt_file_content: Optional[str] = None,
     selected_department_description: Optional[str] = None,
     department_id: Optional[str] = None,
-    context_window: Optional[str] = None,     # NEW — prev/next page context (read-only)
-    already_covered: Optional[List[str]] = None,  # NEW — scenario names already generated
+    context_window: Optional[str] = None,
+    already_covered: Optional[List[str]] = None,
+    selected_checkboxes: Optional[List[str]] = None,   # NEW
 ) -> str:
 
     is_trade_finance = str(department_id or "").strip() == TRADE_FINANCE_DEPT_ID
@@ -3566,6 +3708,37 @@ If a field has no applicable value write N/A — never leave it empty.
             "</additional_instructions>"
         )
 
+    # ── Checkbox-driven generation instructions ───────────────────────────────
+    checkbox_block = ""
+    if selected_checkboxes and len(selected_checkboxes) > 0:
+        # Build a one-line summary of what the user wants
+        selected_labels = [
+            CHECKBOX_PROMPT_MAP[cb]["label"]
+            for cb in selected_checkboxes
+            if cb in CHECKBOX_PROMPT_MAP
+        ]
+        selected_prompts = [
+            CHECKBOX_PROMPT_MAP[cb]["prompt"]
+            for cb in selected_checkboxes
+            if cb in CHECKBOX_PROMPT_MAP
+        ]
+
+        if selected_labels:
+            summary_line = (
+                f"The user has specifically requested test cases covering the following "
+                f"{len(selected_labels)} area(s): "
+                + ", ".join(f'"{l}"' for l in selected_labels)
+                + ". Prioritise generating test cases for ALL of these areas from the "
+                  "page content. Do not skip any of the requested areas."
+            )
+            checkbox_block = (
+                "<user_selected_testcase_requirements>\n"
+                f"{summary_line}\n\n"
+                "DETAILED INSTRUCTIONS PER SELECTED AREA:\n\n"
+                + "\n\n".join(f"▶ {p}" for p in selected_prompts)
+                + "\n</user_selected_testcase_requirements>"
+            )
+
     # ── Point 8: department-specific coverage instructions ────────────────────
     if is_yono2:
         point_8_block = """8. Generate all possible test cases for the below points if information is available in page_content. This document follows a User Story format — apply this structure strictly:
@@ -3609,6 +3782,8 @@ Page: {page_number}
 
 {extra_block}
 
+{checkbox_block}
+
 <page_content>
 IMPORTANT: Generate test cases ONLY from content inside this tag.
 Do NOT generate test cases from rag_context, context_window, or already_generated sections.
@@ -3616,8 +3791,7 @@ Do NOT generate test cases from rag_context, context_window, or already_generate
 </page_content>
 
 <hard_rules>
-1. {"Generate test cases ONLY for the requirements listed in the SELECTED REQUIREMENTS section. Each test case must trace to one of those requirement IDs." if is_rtm_call else "Generate test cases ONLY for functional requirements explicitly present in page_content."}
-2. Do NOT invent fields, transactions, screens, or validations not shown in page_content.
+1. Generate test cases ONLY for functional requirements explicitly present in page_content.
 3. Return empty array [] if page_content contains ONLY:
    - Document metadata (version, author, dates)
    - Confidentiality notices or legal disclaimers
@@ -3822,8 +3996,9 @@ def generate_testcases_for_page_rag(
     prompt_file_content: Optional[str] = None,
     selected_department_description: Optional[str] = None,
     department_id: Optional[str] = None,
-    context_window: Optional[str] = None,           # NEW
-    already_covered: Optional[List[str]] = None,    # NEW
+    context_window: Optional[str] = None,
+    already_covered: Optional[List[str]] = None,
+    selected_checkboxes: Optional[List[str]] = None,   # NEW
 ) -> Dict:
     """
     Generate test cases for a single page.
@@ -3843,20 +4018,21 @@ def generate_testcases_for_page_rag(
                 "status": "skipped", "error": "No text content on page"}
 
     system_msg = _system_prompt_sit() if testcase_type == "SIT" else _system_prompt_uat()
-    user_msg   = _build_page_prompt(
-            page_text    = page_text.strip(),
-            page_number  = page_number,
-            document_name= document_name,
-            rag_context  = _build_rag_context_block(rag_chunks),
-            user_prompt  = user_prompt,
-            testcase_type= testcase_type,
-            page_metadata= page_metadata,
-            prompt_file_content=prompt_file_content,
-            selected_department_description=selected_department_description,
-            department_id=department_id,
-            context_window=context_window,        # NEW
-            already_covered=already_covered,      # NEW
-        )
+    user_msg = _build_page_prompt(
+        page_text                       = page_text.strip(),
+        page_number                     = page_number,
+        document_name                   = document_name,
+        rag_context                     = _build_rag_context_block(rag_chunks),
+        user_prompt                     = user_prompt,
+        testcase_type                   = testcase_type,
+        page_metadata                   = page_metadata,
+        prompt_file_content             = prompt_file_content,
+        selected_department_description = selected_department_description,
+        department_id                   = department_id,
+        context_window                  = context_window,
+        already_covered                 = already_covered,
+        selected_checkboxes             = selected_checkboxes,   # NEW
+    )
 
     max_retries, retry_delay = 3, 2
     # print(".............USERMSG..................\n",user_msg,"\n....................................")
