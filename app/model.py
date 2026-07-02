@@ -13,9 +13,9 @@ class TestCaseRequest(BaseModel):
     uuid: str
     document_name: str
     user_prompt: Optional[str] = None
-    selected_department: Optional[str] = None  # dept context enrichment (optional)
-    rag_doc_ids:Optional[List[str]]=None #  None = Search all ingested docs
-
+    selected_department: Optional[str] = None
+    rag_doc_ids: Optional[List[str]] = None
+    selected_checkboxes: Optional[List[str]] = None   # NEW
 # ============================================================================
 # USER MODELS
 # ============================================================================
