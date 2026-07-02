@@ -537,19 +537,21 @@ async def generate_testcases(
             #   context_window  → reading context only (passed separately)
             #   already_covered → prevents regenerating covered scenarios
             result = generate_testcases_for_page_rag(
-                page_number                    = pn,
-                page_text                      = page_text.strip(),
-                document_name                  = request.document_name,
-                rag_chunks                     = rag_chunks,
-                user_prompt                    = up_prompt,
-                testcase_type                  = tc_type,
-                page_metadata                  = page_meta,
-                prompt_file_content            = None,
-                selected_department_description= None,
-                department_id                  = user_dept,
-                context_window                 = context_window,
-                already_covered                = list(generated_scenarios),
+                page_number                     = pn,
+                page_text                       = page_text.strip(),
+                document_name                   = request.document_name,
+                rag_chunks                      = rag_chunks,
+                user_prompt                     = up_prompt,
+                testcase_type                   = tc_type,
+                page_metadata                   = page_meta,
+                prompt_file_content             = None,
+                selected_department_description = None,
+                department_id                   = user_dept,
+                context_window                  = context_window,
+                already_covered                 = list(generated_scenarios),
+                selected_checkboxes             = request.selected_checkboxes or [],   # NEW
             )
+
             page_results.append(result)
             if result["status"] == "success":
                 all_testcases.extend(result["testcases"])
@@ -1001,4 +1003,17 @@ async def generate_feature_file_endpoint(
         import traceback
         print(f"Feature file generation error: {traceback.format_exc()}")
         raise HTTPException(500, f"Feature file generation failed: {str(e)}")
+    
+@testcase_router.get("/testcase-categories")
+async def get_testcase_categories(
+    current_user: Annotated[User, Depends(get_current_active_user)] = ...,
+):
+    """Return available testcase category checkboxes for the UI."""
+    from api.utils.rag_utils import CHECKBOX_PROMPT_MAP
+    return {
+        "categories": [
+            {"id": key, "label": val["label"]}
+            for key, val in CHECKBOX_PROMPT_MAP.items()
+        ]
+    }
 
