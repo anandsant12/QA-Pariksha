@@ -691,10 +691,6 @@ const LoadingSkeleton: React.FC = () => (
         </Box>
     </Box>
 );
-
-// ============================================================================
-// GENERATE PANEL
-// ============================================================================
 const GeneratePanel: React.FC<{
     pdfData: PDFData;
     onGenerate: (userPrompt: string, selectedCheckboxes: string[]) => void;
@@ -702,14 +698,13 @@ const GeneratePanel: React.FC<{
     testcaseClient: string;
 }> = ({ pdfData, onGenerate, userPrompt, testcaseClient }) => {
 
-    const [categories, setCategories]         = useState<TestcaseCategory[]>([]);
-    const [selectedIds, setSelectedIds]       = useState<Set<string>>(new Set());
-    const [catLoading, setCatLoading]         = useState(true);
+    const [categories, setCategories]   = useState<TestcaseCategory[]>([]);
+    const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+    const [catLoading, setCatLoading]   = useState(true);
 
     useEffect(() => {
         fetchTestcaseCategories().then(cats => {
             setCategories(cats);
-            // Default: all selected
             setSelectedIds(new Set(cats.map(c => c.id)));
         }).finally(() => setCatLoading(false));
     }, []);
@@ -735,76 +730,172 @@ const GeneratePanel: React.FC<{
     };
 
     return (
-        <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', textAlign: 'center', px: 4 }}>
-            <AutoAwesome sx={{ fontSize: 80, color: '#1aa7d1', mb: 3, opacity: 0.8 }} />
-            <Typography variant="h5" sx={{ fontWeight: 700, color: '#0f172a', mb: 1 }}>Ready to Generate</Typography>
-            <Typography variant="body1" color="text.secondary" sx={{ mb: 3, maxWidth: 500 }}>
+        <Box
+            sx={{
+                display        : 'flex',
+                flexDirection  : 'column',
+                alignItems     : 'center',
+                width          : '100%',
+                height         : '100%',
+                overflowY      : 'auto',
+                overflowX      : 'hidden',
+                px             : 2,
+                py             : 3,
+                boxSizing      : 'border-box',
+                '&::-webkit-scrollbar'      : { width: 6 },
+                '&::-webkit-scrollbar-thumb': { bgcolor: '#1aa7d1', borderRadius: 3 },
+            }}
+        >
+            {/* ── Icon ── */}
+            <Box
+                sx={{
+                    width           : 72,
+                    height          : 72,
+                    borderRadius    : '50%',
+                    bgcolor         : '#e8f7fc',
+                    display         : 'flex',
+                    alignItems      : 'center',
+                    justifyContent  : 'center',
+                    mb              : 2,
+                    flexShrink      : 0,
+                }}
+            >
+                <AutoAwesome sx={{ fontSize: 38, color: '#1aa7d1' }} />
+            </Box>
+
+            {/* ── Heading ── */}
+            <Typography
+                variant="h5"
+                sx={{ fontWeight: 700, color: '#0f172a', mb: 0.75, textAlign: 'center' }}
+            >
+                Ready to Generate
+            </Typography>
+            <Typography
+                variant="body2"
+                color="text.secondary"
+                sx={{ mb: 2.5, textAlign: 'center', maxWidth: 480, px: 1 }}
+            >
                 <strong>{pdfData.filename}</strong> has been processed ({pdfData.total_pages} pages).
                 Select the types of test cases you want generated, then click Generate.
             </Typography>
 
-            <Box sx={{ display: 'flex', gap: 2, mb: 3, flexWrap: 'wrap', justifyContent: 'center' }}>
-                <Chip label={`${pdfData.total_pages} pages`} color="primary" variant="outlined" />
-                <Chip label={testcaseClient} color={testcaseClient === 'UAT' ? 'success' : 'secondary'} />
-                {userPrompt.trim() && <Chip label="Custom instructions ✓" color="info" variant="outlined" size="small" />}
+            {/* ── Chips ── */}
+            <Box
+                sx={{
+                    display        : 'flex',
+                    gap            : 1,
+                    mb             : 2.5,
+                    flexWrap       : 'wrap',
+                    justifyContent : 'center',
+                    width          : '100%',
+                }}
+            >
+                <Chip label={`${pdfData.total_pages} pages`} color="primary" variant="outlined" size="small" />
+                <Chip
+                    label={testcaseClient}
+                    color={testcaseClient === 'UAT' ? 'success' : 'secondary'}
+                    size="small"
+                />
+                {userPrompt.trim() && (
+                    <Chip label="Custom instructions ✓" color="info" variant="outlined" size="small" />
+                )}
             </Box>
 
-            {/* ── Testcase Category Selector ── */}
-            <Box sx={{ width: '100%', maxWidth: 640, mb: 3, textAlign: 'left' }}>
+            {/* ── Category selector ── */}
+            <Box sx={{ width: '100%', maxWidth: 600, mb: 2.5 }}>
                 <Typography variant="body2" sx={{ fontWeight: 700, mb: 0.5, color: '#1f3c88' }}>
                     🎯 Select Test Case Categories
                 </Typography>
-                <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1.5 }}>
+                <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
                     Choose which types of test cases to generate. All are selected by default.
                 </Typography>
 
                 {catLoading ? (
                     <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, py: 1 }}>
                         <CircularProgress size={16} />
-                        <Typography variant="caption" color="text.secondary">Loading categories…</Typography>
+                        <Typography variant="caption" color="text.secondary">
+                            Loading categories…
+                        </Typography>
                     </Box>
                 ) : (
-                    <Box sx={{ border: '1px solid #1aa7d1', borderRadius: 2, bgcolor: '#F4FCFF', overflow: 'hidden' }}>
-                        {/* Select All header */}
-                        <Box sx={{
-                            display: 'flex', alignItems: 'center',
-                            px: 1.5, py: 0.75, bgcolor: '#d6eef8',
-                            borderBottom: '1px solid #1aa7d1',
-                        }}>
+                    <Box
+                        sx={{
+                            border      : '1px solid #1aa7d1',
+                            borderRadius: 2,
+                            bgcolor     : '#F4FCFF',
+                            overflow    : 'hidden',
+                            width       : '100%',
+                        }}
+                    >
+                        {/* Select All row */}
+                        <Box
+                            sx={{
+                                display      : 'flex',
+                                alignItems   : 'center',
+                                px           : 1.5,
+                                py           : 0.75,
+                                bgcolor      : '#d6eef8',
+                                borderBottom : '1px solid #1aa7d1',
+                            }}
+                        >
                             <Checkbox
                                 checked={allSelected}
                                 indeterminate={!allSelected && !noneSelected}
                                 onChange={toggleAll}
                                 size="small"
-                                sx={{ color: '#1aa7d1', '&.Mui-checked': { color: '#1aa7d1' }, '&.MuiCheckbox-indeterminate': { color: '#1aa7d1' } }}
+                                sx={{
+                                    p                              : 0.25,
+                                    color                          : '#1aa7d1',
+                                    '&.Mui-checked'               : { color: '#1aa7d1' },
+                                    '&.MuiCheckbox-indeterminate' : { color: '#1aa7d1' },
+                                }}
                             />
-                            <Typography variant="caption" sx={{ fontWeight: 700, color: '#1f3c88', flex: 1 }}>
-                                {allSelected ? 'Deselect All' : noneSelected ? 'Select All' : `${selectedIds.size} of ${categories.length} selected`}
+                            <Typography
+                                variant="caption"
+                                sx={{ fontWeight: 700, color: '#1f3c88', flex: 1 }}
+                            >
+                                {allSelected
+                                    ? 'Deselect All'
+                                    : noneSelected
+                                        ? 'Select All'
+                                        : `${selectedIds.size} of ${categories.length} selected`}
+                            </Typography>
+                            <Typography variant="caption" color="text.secondary">
+                                {categories.length} categories
                             </Typography>
                         </Box>
 
-                        {/* 2-column grid of checkboxes */}
-                        <Box sx={{
-                            display: 'grid',
-                            gridTemplateColumns: '1fr 1fr',
-                            maxHeight: 320,
-                            overflowY: 'auto',
-                            '&::-webkit-scrollbar': { width: 6 },
-                            '&::-webkit-scrollbar-thumb': { bgcolor: '#1aa7d1', borderRadius: 3 },
-                        }}>
+                        {/* Checkbox list — single column, scrollable */}
+                        <Box
+                            sx={{
+                                maxHeight         : 260,
+                                overflowY         : 'auto',
+                                overflowX         : 'hidden',
+                                '&::-webkit-scrollbar'      : { width: 5 },
+                                '&::-webkit-scrollbar-track': { bgcolor: '#f0f8fd' },
+                                '&::-webkit-scrollbar-thumb': { bgcolor: '#1aa7d1', borderRadius: 3 },
+                            }}
+                        >
                             {categories.map((cat, idx) => (
                                 <Box
                                     key={cat.id}
                                     onClick={() => toggleOne(cat.id)}
                                     sx={{
-                                        display: 'flex', alignItems: 'flex-start',
-                                        px: 1.5, py: 0.75, cursor: 'pointer',
-                                        borderBottom: '1px solid #e3f2fd',
-                                        borderRight: idx % 2 === 0 ? '1px solid #e3f2fd' : 'none',
-                                        bgcolor: selectedIds.has(cat.id) ? 'transparent' : 'rgba(0,0,0,0.02)',
-                                        '&:hover': { bgcolor: '#dff0fb' },
-                                        transition: 'background-color 0.15s',
-                                        gap: 0.75,
+                                        display      : 'flex',
+                                        alignItems   : 'center',
+                                        px           : 1.5,
+                                        py           : 0.6,
+                                        cursor       : 'pointer',
+                                        borderBottom : idx < categories.length - 1
+                                            ? '1px solid #e3f2fd'
+                                            : 'none',
+                                        bgcolor      : selectedIds.has(cat.id)
+                                            ? 'transparent'
+                                            : 'rgba(0,0,0,0.02)',
+                                        '&:hover'    : { bgcolor: '#dff0fb' },
+                                        transition   : 'background-color 0.15s',
+                                        gap          : 1,
+                                        minWidth     : 0,
                                     }}
                                 >
                                     <Checkbox
@@ -812,56 +903,130 @@ const GeneratePanel: React.FC<{
                                         onChange={() => toggleOne(cat.id)}
                                         onClick={e => e.stopPropagation()}
                                         size="small"
-                                        sx={{ p: 0.25, mt: 0.1, flexShrink: 0, color: '#1aa7d1', '&.Mui-checked': { color: '#1aa7d1' } }}
+                                        sx={{
+                                            p              : 0.25,
+                                            flexShrink     : 0,
+                                            color          : '#1aa7d1',
+                                            '&.Mui-checked': { color: '#1aa7d1' },
+                                        }}
                                     />
-                                    <Typography variant="caption" sx={{ fontWeight: 500, lineHeight: 1.4, fontSize: '0.72rem' }}>
+                                    {/* Numbered badge */}
+                                    <Box
+                                        sx={{
+                                            minWidth       : 22,
+                                            height         : 22,
+                                            borderRadius   : '50%',
+                                            bgcolor        : selectedIds.has(cat.id)
+                                                ? '#1aa7d1'
+                                                : '#e0e0e0',
+                                            display        : 'flex',
+                                            alignItems     : 'center',
+                                            justifyContent : 'center',
+                                            flexShrink     : 0,
+                                            transition     : 'background-color 0.15s',
+                                        }}
+                                    >
+                                        <Typography
+                                            variant="caption"
+                                            sx={{
+                                                fontSize   : '0.62rem',
+                                                fontWeight : 700,
+                                                color      : selectedIds.has(cat.id)
+                                                    ? 'white'
+                                                    : '#757575',
+                                                lineHeight : 1,
+                                            }}
+                                        >
+                                            {idx + 1}
+                                        </Typography>
+                                    </Box>
+                                    <Typography
+                                        variant="caption"
+                                        sx={{
+                                            fontWeight    : selectedIds.has(cat.id) ? 600 : 400,
+                                            color         : selectedIds.has(cat.id)
+                                                ? '#1f3c88'
+                                                : 'text.primary',
+                                            fontSize      : '0.75rem',
+                                            lineHeight    : 1.4,
+                                            overflow      : 'hidden',
+                                            textOverflow  : 'ellipsis',
+                                            whiteSpace    : 'nowrap',
+                                            flex          : 1,
+                                            minWidth      : 0,
+                                        }}
+                                    >
                                         {cat.label}
                                     </Typography>
                                 </Box>
                             ))}
                         </Box>
 
-                        {/* Footer */}
-                        <Box sx={{ px: 1.5, py: 0.5, bgcolor: '#eaf6fc', borderTop: '1px solid #c8e6f5' }}>
+                        {/* Footer summary */}
+                        <Box
+                            sx={{
+                                px          : 1.5,
+                                py          : 0.5,
+                                bgcolor     : '#eaf6fc',
+                                borderTop   : '1px solid #c8e6f5',
+                            }}
+                        >
                             <Typography variant="caption" color="text.secondary">
                                 {noneSelected
-                                    ? '⚠️ No categories selected — select at least one'
-                                    : `✅ ${selectedIds.size} categor${selectedIds.size === 1 ? 'y' : 'ies'} selected`}
+                                    ? '⚠️ No categories selected — please select at least one'
+                                    : `✅ ${selectedIds.size} categor${selectedIds.size === 1 ? 'y' : 'ies'} will be used to focus generation`}
                             </Typography>
                         </Box>
                     </Box>
                 )}
             </Box>
 
-            <Alert severity="info" sx={{ mb: 4, maxWidth: 560, textAlign: 'left' }}>
-                <Typography variant="body2">
-                    💡 RAG context is automatically retrieved from ingested documents for your department, if any exist.
-                    Selected categories focus the LLM on generating those specific test case types.
-                </Typography>
-            </Alert>
-
-            <Button
-                variant="contained"
-                size="large"
-                onClick={handleGenerate}
-                disabled={noneSelected}
-                startIcon={<AutoAwesome />}
-                sx={{
-                    background: 'linear-gradient(135deg, #1aa7d1 0%, #1f3c88 100%)',
-                    py: 2, px: 6, fontSize: '1.1rem', fontWeight: 700,
-                    textTransform: 'none', borderRadius: 3,
-                    boxShadow: '0 4px 20px rgba(31,60,136,0.4)',
-                    '&:hover': { background: 'linear-gradient(135deg, #1f3c88 0%, #1aa7d1 100%)' },
-                    '&:disabled': { opacity: 0.5 },
-                }}
-            >
-                Generate Testcases — {testcaseClient}
-                {!noneSelected && !allSelected && (
-                    <Typography component="span" variant="caption" sx={{ ml: 1.5, opacity: 0.85, fontWeight: 400 }}>
-                        ({selectedIds.size} categories)
+            {/* ── Info alert ── */}
+            <Box sx={{ width: '100%', maxWidth: 600, mb: 3 }}>
+                <Alert severity="info" sx={{ py: 0.75 }}>
+                    <Typography variant="caption">
+                        💡 RAG context is retrieved from ingested documents for your department automatically.
+                        Selected categories focus the LLM on those specific test case types.
                     </Typography>
-                )}
-            </Button>
+                </Alert>
+            </Box>
+
+            {/* ── Generate button ── */}
+            <Box sx={{ width: '100%', maxWidth: 600, pb: 2 }}>
+                <Button
+                    variant="contained"
+                    fullWidth
+                    size="large"
+                    onClick={handleGenerate}
+                    disabled={noneSelected}
+                    startIcon={<AutoAwesome />}
+                    sx={{
+                        background      : 'linear-gradient(135deg, #1aa7d1 0%, #1f3c88 100%)',
+                        py              : 1.75,
+                        fontSize        : '1rem',
+                        fontWeight      : 700,
+                        textTransform   : 'none',
+                        borderRadius    : 2,
+                        boxShadow       : '0 4px 20px rgba(31,60,136,0.35)',
+                        '&:hover'       : {
+                            background  : 'linear-gradient(135deg, #1f3c88 0%, #1aa7d1 100%)',
+                            boxShadow   : '0 6px 24px rgba(31,60,136,0.45)',
+                        },
+                        '&:disabled'    : { opacity: 0.5 },
+                    }}
+                >
+                    Generate Testcases — {testcaseClient}
+                    {!noneSelected && !allSelected && (
+                        <Typography
+                            component="span"
+                            variant="caption"
+                            sx={{ ml: 1.5, opacity: 0.85, fontWeight: 400, fontSize: '0.78rem' }}
+                        >
+                            ({selectedIds.size} categories)
+                        </Typography>
+                    )}
+                </Button>
+            </Box>
         </Box>
     );
 };
